@@ -9,6 +9,7 @@ export type RunConfig = {
   model_verify?: string;
   mode_ratio?: number;
   families?: Record<string, number>;
+  queries?: string[];
   domains?: string[];
   excluded_domains?: string[];
   sources?: Record<string, boolean>;
@@ -25,7 +26,7 @@ type NormalizedRunConfig = {
   model_verify: string;
   mode_ratio: number;
   families: Record<string, number>;
-  domains: string[];
+  queries: string[];
   excluded_domains: string[];
   sources: Record<string, boolean>;
   period_days: number;
@@ -53,15 +54,6 @@ type Analysis = {
   domain: string;
 };
 
-const FAMILY_QUERIES: Record<string, string[]> = {
-  workaround: ["엑셀로 정리", "수기로 관리", "일일이 입력", "매번 손으로", "이중 입력"],
-  question: ["다들 어떻게 하세요", "어떻게들 관리하세요", "방법 있을까요", "노하우 좀"],
-  seeking: ["프로그램 추천", "앱 추천", "툴 추천", "자동화 방법", "대체할 만한"],
-  emotion: ["진짜 짜증", "미치겠", "왜 이렇게 불편", "답답하다", "스트레스"],
-  giveup: ["포기했", "그냥 안 하기로", "손 놨", "어쩔 수 없이"],
-  request: ["만들어주실 분", "개발 의뢰", "견적", "제작 문의"],
-};
-
 const SOURCE_MAP: Record<string, NaverSearchType> = {
   naverCafe: "cafearticle", naverKin: "kin", naverBlog: "blog", naverWeb: "webkr",
   "네이버카페": "cafearticle", "지식iN": "kin", "블로그": "blog", "웹문서": "webkr",
@@ -73,13 +65,13 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
   const dailyCostUsd = Math.min(Math.max(input.limits?.dailyCostUsd ?? DEFAULT_LIMITS.DAILY_COST_CEILING_USD, .1), HARD_LIMITS.DAILY_COST_CEILING_USD);
   return {
     id: input.id,
-    name: input.name ?? "기본 실행",
+    name: input.name ?? "직접 검색",
     model_stage1: allowModel(input.model_stage1, "claude-haiku-4-5-20251001"),
     model_stage2: allowModel(input.model_stage2, "claude-haiku-4-5-20251001"),
     model_verify: allowModel(input.model_verify, "claude-sonnet-5"),
     mode_ratio: Math.min(Math.max(input.mode_ratio ?? 70, 0), 100),
     families: input.families ?? { workaround: 30, question: 30, seeking: 20, giveup: 10, request: 10 },
-    domains: input.domains?.length ? input.domains : ["자영업", "교육", "이커머스"],
+    queries: [...new Set((input.queries ?? input.domains ?? []).map(query => query.trim()).filter(Boolean))],
     excluded_domains: input.excluded_domains ?? ["연예", "정치", "스포츠"],
     sources: input.sources ?? { naverCafe: true, naverKin: true, naverBlog: true, appstore: true },
     period_days: Math.min(Math.max(input.period_days ?? 7, 1), 365),
@@ -93,18 +85,7 @@ function allowModel(value: string | undefined, fallback: string) {
 }
 
 function makeQueries(config: ReturnType<typeof normalizeConfig>) {
-  const families = Object.entries(config.families).filter(([, weight]) => weight > 0).sort((a, b) => b[1] - a[1]);
-  const result: string[] = [];
-  for (let round = 0; result.length < config.limits.queries; round++) {
-    for (const [family] of families) {
-      const phrases = FAMILY_QUERIES[family] ?? [];
-      if (!phrases.length) continue;
-      const domain = config.domains[result.length % config.domains.length];
-      result.push(`${domain} ${phrases[round % phrases.length]}`);
-      if (result.length >= config.limits.queries) break;
-    }
-  }
-  return result;
+  return config.queries.slice(0, config.limits.queries);
 }
 
 function isJunk(item: RawSignal, excluded: string[]) {
@@ -231,6 +212,7 @@ export async function runPipeline(input: RunConfig) {
   const startedAt = new Date().toISOString();
   const errors: string[] = [];
   const queries = makeQueries(config);
+  if (!queries.length) throw new Error("검색어를 1개 이상 입력해 주세요.");
   const collected = await Promise.all([collectNaver(config, queries, errors), collectHn(config, queries, errors), collectThreads(config, queries, errors), collectAppReviews(config, errors)]).then(parts => parts.flat());
   const deduped = [...new Map(collected.map(item => [`${item.source}:${item.source_id}`, item])).values()];
   const filtered = deduped.filter(item => !isJunk(item, config.excluded_domains));
