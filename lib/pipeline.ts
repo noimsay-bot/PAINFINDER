@@ -1,4 +1,6 @@
 import { DEFAULT_LIMITS, HARD_LIMITS } from "./limits";
+import { getLlmProvider, LlmProviderError, resolveLlmModel, type LlmResult } from "./llm";
+import { calculateLlmCost } from "./llm/pricing";
 import { normalizeNaverText, searchNaver, type NaverSearchType } from "./naver";
 
 export type RunConfig = {
@@ -66,9 +68,9 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
   return {
     id: input.id,
     name: input.name ?? "직접 검색",
-    model_stage1: allowModel(input.model_stage1, "claude-haiku-4-5-20251001"),
-    model_stage2: allowModel(input.model_stage2, "claude-haiku-4-5-20251001"),
-    model_verify: allowModel(input.model_verify, "claude-sonnet-5"),
+    model_stage1: input.model_stage1 ?? "claude-haiku-4-5-20251001",
+    model_stage2: input.model_stage2 ?? "claude-sonnet-5",
+    model_verify: input.model_verify ?? "claude-sonnet-5",
     mode_ratio: Math.min(Math.max(input.mode_ratio ?? 70, 0), 100),
     families: input.families ?? { workaround: 30, question: 30, seeking: 20, giveup: 10, request: 10 },
     queries: [...new Set((input.queries ?? input.domains ?? []).map(query => query.trim()).filter(Boolean))],
@@ -78,10 +80,6 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
     app_list: input.app_list ?? [],
     limits: { queries, itemsPerSource, dailyCostUsd },
   };
-}
-
-function allowModel(value: string | undefined, fallback: string) {
-  return value === "claude-sonnet-5" || value === "claude-haiku-4-5-20251001" ? value : fallback;
 }
 
 function makeQueries(config: ReturnType<typeof normalizeConfig>) {
@@ -173,36 +171,6 @@ async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, err
   return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.appstore);
 }
 
-function extractJson(text: string) {
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  const start = Math.min(...[cleaned.indexOf("["), cleaned.indexOf("{")].filter(i => i >= 0));
-  return JSON.parse(start >= 0 ? cleaned.slice(start) : cleaned);
-}
-
-async function anthropicJson(model: string, prompt: string, maxTokens = 1800) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new Error("ANTHROPIC_API_KEY missing");
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= DEFAULT_LIMITS.LLM_MAX_RETRIES; attempt++) {
-    try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" }, body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0, messages: [{ role: "user", content: prompt }] }) });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
-        const detail = payload?.error?.message ?? "요청이 거부되었습니다.";
-        const failure = new Error(`Anthropic ${response.status}: ${detail}`);
-        if (response.status < 500 && response.status !== 429) throw Object.assign(failure, { nonRetryable: true });
-        throw failure;
-      }
-      const data = await response.json() as { content?: Array<{ type: string; text?: string }> };
-      return extractJson(data.content?.find(c => c.type === "text")?.text ?? "");
-    } catch (error) {
-      lastError = error;
-      if (error instanceof Error && "nonRetryable" in error) throw error;
-    }
-  }
-  throw lastError;
-}
-
 function fallbackAnalysis(item: RawSignal): Analysis {
   return { pain_summary: item.title || item.body.slice(0, 90), who: "확인 필요", current_workaround: null, frequency: "occasional", money_signal: null, search_terms_for_verification: [item.title], domain: "미분류" };
 }
@@ -216,20 +184,57 @@ export async function runPipeline(input: RunConfig) {
   const collected = await Promise.all([collectNaver(config, queries, errors), collectHn(config, queries, errors), collectThreads(config, queries, errors), collectAppReviews(config, errors)]).then(parts => parts.flat());
   const deduped = [...new Map(collected.map(item => [`${item.source}:${item.source_id}`, item])).values()];
   const filtered = deduped.filter(item => !isJunk(item, config.excluded_domains));
+  const llm = getLlmProvider();
+  const stage1Model = resolveLlmModel(config.model_stage1, "stage1");
+  const stage2Model = resolveLlmModel(config.model_stage2, "stage2");
+  const unknownPricing = new Set<string>();
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let runningCost = 0;
+  let stoppedReason: string | null = null;
+  const recordUsage = (result: LlmResult) => {
+    inputTokens += result.inputTokens;
+    outputTokens += result.outputTokens;
+    const cost = calculateLlmCost(result.model, result.inputTokens, result.outputTokens);
+    if (cost === null) {
+      if (!unknownPricing.has(result.model)) {
+        unknownPricing.add(result.model);
+        errors.push(`warning:pricing:unknown-model:${result.model}`);
+      }
+      return;
+    }
+    runningCost += cost;
+    if (runningCost >= config.limits.dailyCostUsd) stoppedReason = "daily_cost_ceiling";
+  };
+  const noteLlmError = (stage: "llm1" | "llm2", error: unknown) => {
+    const message = error instanceof Error ? error.message : "failed";
+    errors.push(`${stage}:${message}`);
+    if (error instanceof LlmProviderError) {
+      stoppedReason = error.details.code === "insufficient_quota" ? "llm_insufficient_quota" : `llm_${error.details.status ?? "connection"}`;
+      return true;
+    }
+    return false;
+  };
   const stage1: Stage1[] = [];
   let llm1Calls = 0;
-  if (process.env.ANTHROPIC_API_KEY) {
-    for (let offset = 0; offset < filtered.length && llm1Calls < DEFAULT_LIMITS.LLM1_MAX_CALLS_PER_RUN; offset += 20) {
-      const batch = filtered.slice(offset, offset + 20);
-      try {
-        const result = await anthropicJson(config.model_stage1, `다음 게시물에서 반복 불편, 질문형 수요, 도구 탐색 실패, 임시방편, 포기, 지불 의사 중 하나라도 있으면 넓게 통과시켜라. JSON 배열만 반환: [{"id":"...","pass":true,"type":"1~6","reason":"한 줄"}].\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`) as Stage1[];
-        stage1.push(...result); llm1Calls++;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "failed";
-        errors.push(`llm1:${message}`);
-        for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, type: "llm1_failed", reason: "판정 실패" });
-        if (/Anthropic 4\d\d/.test(message)) break;
-      }
+  for (let offset = 0; offset < filtered.length && llm1Calls < DEFAULT_LIMITS.LLM1_MAX_CALLS_PER_RUN && !stoppedReason; offset += 20) {
+    const batch = filtered.slice(offset, offset + 20);
+    try {
+      const completion = await llm.complete({
+        model: stage1Model,
+        jsonMode: true,
+        maxOutputTokens: 1800,
+        system: "너는 게시물에서 실제 페인포인트 신호를 판정하는 분석기다. 반드시 유효한 JSON 객체로만 응답하라.",
+        user: `다음 게시물에서 반복 불편, 질문형 수요, 도구 탐색 실패, 임시방편, 포기, 지불 의사 중 하나라도 있으면 넓게 통과시켜라. 반드시 {"results":[{"id":"...","pass":true,"type":"1~6","reason":"한 줄"}]} 형태의 JSON 객체로 응답하라.\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`,
+      });
+      llm1Calls++;
+      recordUsage(completion);
+      const parsed = JSON.parse(completion.text) as { results?: Stage1[] };
+      if (!Array.isArray(parsed.results)) throw new Error("LLM 1차 응답에 results 배열이 없습니다.");
+      stage1.push(...parsed.results);
+    } catch (error) {
+      for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, type: "llm1_failed", reason: "판정 실패" });
+      if (noteLlmError("llm1", error)) break;
     }
   }
   const passedIndexes = stage1.filter(x => x.pass).map(x => Number(x.id)).filter(Number.isFinite);
@@ -237,10 +242,21 @@ export async function runPipeline(input: RunConfig) {
   const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: Array<Record<string, unknown>>; scores: number[] }> = [];
   let llm2Calls = 0; let verifyCalls = 0;
   for (const raw of passed) {
+    if (stoppedReason) break;
     let analysis = fallbackAnalysis(raw);
+    let stopAfterItem = false;
     try {
-      analysis = await anthropicJson(config.model_stage2, `게시물의 페인포인트를 분석해 JSON 객체만 반환하라: {"pain_summary":"누가 무엇 때문에 불편한가","who":"직업/역할","current_workaround":null,"frequency":"daily|weekly|monthly|occasional","money_signal":null,"search_terms_for_verification":["검색어 3개"],"domain":"태그"}.\n${JSON.stringify(raw)}`) as Analysis; llm2Calls++;
-    } catch (error) { errors.push(`llm2:${error instanceof Error ? error.message : "failed"}`); }
+      const completion = await llm.complete({
+        model: stage2Model,
+        jsonMode: true,
+        maxOutputTokens: 1800,
+        system: "너는 게시물의 페인포인트를 구조화하는 분석기다. 반드시 유효한 JSON 객체로만 응답하라.",
+        user: `게시물의 페인포인트를 분석해 {"pain_summary":"누가 무엇 때문에 불편한가","who":"직업/역할","current_workaround":null,"frequency":"daily|weekly|monthly|occasional","money_signal":null,"search_terms_for_verification":["검색어 3개"],"domain":"태그"} 형태의 JSON 객체로 응답하라.\n${JSON.stringify(raw)}`,
+      });
+      llm2Calls++;
+      recordUsage(completion);
+      analysis = JSON.parse(completion.text) as Analysis;
+    } catch (error) { stopAfterItem = noteLlmError("llm2", error); }
     const competitors: Array<Record<string, unknown>> = [];
     if (verifyCalls < DEFAULT_LIMITS.VERIFY_MAX_PER_RUN && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) {
       for (const term of analysis.search_terms_for_verification.slice(0, 3)) {
@@ -254,10 +270,11 @@ export async function runPipeline(input: RunConfig) {
     const uniqueCompetitors = [...new Map(competitors.map(c => [String(c.url), c])).values()].slice(0, 8);
     const scores = [analysis.current_workaround ? 2 : 1, 1, 2, uniqueCompetitors.length > 1 ? 2 : 1, analysis.money_signal ? 2 : 0, 1];
     analyses.push({ raw, analysis, competitors: uniqueCompetitors, scores });
+    if (stopAfterItem) break;
   }
   const stageCounts = { collected: deduped.length, rulePassed: filtered.length, llm1Passed: passed.length, llm2Analyzed: analyses.length, verified: analyses.filter(a => a.competitors.length > 0).length };
-  const costEstimate = Number((llm1Calls * .004 + llm2Calls * .012 + verifyCalls * .025).toFixed(4));
-  return { mode: collected.length || process.env.ANTHROPIC_API_KEY ? "live" : "demo", config, startedAt, endedAt: new Date().toISOString(), queries, stageCounts, llmCalls: { stage1: llm1Calls, stage2: llm2Calls, verify: verifyCalls }, costEstimate, stoppedReason: costEstimate >= config.limits.dailyCostUsd ? "daily_cost_ceiling" : null, errors, candidates: analyses };
+  const costEstimate = Number(runningCost.toFixed(4));
+  return { mode: "live", config, startedAt, endedAt: new Date().toISOString(), queries, stageCounts, llmCalls: { stage1: llm1Calls, stage2: llm2Calls, verify: verifyCalls, inputTokens, outputTokens }, costEstimate, stoppedReason, errors, candidates: analyses };
 }
 
 export async function supabaseRest(path: string, init: RequestInit = {}) {
