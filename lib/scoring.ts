@@ -4,7 +4,7 @@ export type BuyerContext = "business" | "individual_repeated" | "hobby_or_oneoff
 
 export type FourScores = {
   f1: number;
-  f4: number;
+  f4: number | null;
   f5: number;
   f6: number;
   total: number;
@@ -36,5 +36,5 @@ export function calculateFourScores(opts: {
   const f4 = scoreMarket(opts.verdict);
   const f5 = scorePayment(opts);
   const f6 = clamp(opts.maintenanceScore, 2);
-  return { f1, f4, f5, f6, total: f1 + f4 + f5 + f6 };
+  return { f1, f4, f5, f6, total: f1 + (f4 ?? 0) + f5 + f6 };
 }

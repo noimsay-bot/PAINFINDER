@@ -42,6 +42,7 @@ test("시장 판정은 개수가 아니라 가격 성격을 따른다", () => {
   assert.equal(scoreMarket("empty"), 2);
   assert.equal(scoreMarket("crowded"), 1);
   assert.equal(scoreMarket("all_free"), 0);
+  assert.equal(scoreMarket("unverified"), null);
 });
 
 test("앱 마켓과 정밀 검증 검색어는 도메인의 핵심어만 사용한다", () => {

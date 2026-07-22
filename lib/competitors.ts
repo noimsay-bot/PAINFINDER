@@ -27,7 +27,7 @@ const DOCUMENT_EXTENSION = /\.(pdf|xlsx|hwp)(?:$|[?#])/i;
 const PUBLIC_DOWNLOAD_PATH = /(download|exldown|getlist|\.pdf(?:$|[?#]))/i;
 
 export type CompetitorPricing = "free" | "freemium" | "paid" | "public" | "unknown";
-export type MarketVerdict = "empty" | "all_free" | "public_owned" | "paid_exists" | "crowded";
+export type MarketVerdict = "unverified" | "empty" | "all_free" | "public_owned" | "paid_exists" | "crowded";
 export type CompetitorSource = "appstore" | "web";
 
 export type SearchCandidate = { title: string; snippet: string; url: string; reviewLike: boolean };
@@ -113,7 +113,7 @@ export function classifyMarket(products: ProductCompetitor[]): MarketVerdict {
 }
 
 export function scoreMarket(verdict: MarketVerdict) {
-  return ({ paid_exists: 3, empty: 2, crowded: 1, all_free: 0, public_owned: 0 } as const)[verdict];
+  return ({ unverified: null, paid_exists: 3, empty: 2, crowded: 1, all_free: 0, public_owned: 0 } as const)[verdict];
 }
 
 export function buildAppSearchTerms(domain: string) {

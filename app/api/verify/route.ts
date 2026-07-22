@@ -42,7 +42,7 @@ export async function POST(request: Request) {
 
     await supabaseRest(`competitors?pain_point_id=eq.${encodeURIComponent(body.painPointId)}`, { method: "DELETE" });
     if (competitors.length) await supabaseRest("competitors", { method: "POST", body: JSON.stringify(competitors.map(competitor => ({ ...competitor, pain_point_id: body.painPointId }))) });
-    await supabaseRest(`scores?pain_point_id=eq.${encodeURIComponent(body.painPointId)}`, { method: "PATCH", body: JSON.stringify({ f4, f5, verdict }) });
+    await supabaseRest(`scores?pain_point_id=eq.${encodeURIComponent(body.painPointId)}`, { method: "PATCH", body: JSON.stringify({ f4, f5, verdict, verified: true }) });
     await supabaseRest(`pain_points?id=eq.${encodeURIComponent(body.painPointId)}`, { method: "PATCH", body: JSON.stringify({ precision_verified_at: verifiedAt }) });
 
     const usage = verification.usage;

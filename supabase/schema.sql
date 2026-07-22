@@ -26,7 +26,8 @@ create table if not exists seed_queries (
   query_text text not null,
   domain text not null,
   active boolean not null default true,
-  last_used_at timestamptz
+  last_used_at timestamptz,
+  origin text not null default 'manual'
 );
 
 create table if not exists run_logs (
@@ -90,12 +91,35 @@ create table if not exists scores (
   f1 smallint not null check (f1 between 0 and 2),
   f2 smallint check (f2 between 0 and 2),
   f3 smallint check (f3 between 0 and 2),
-  f4 smallint not null check (f4 between 0 and 3),
+  f4 smallint check (f4 between 0 and 3),
   f5 smallint not null check (f5 between 0 and 3),
   f6 smallint not null check (f6 between 0 and 2),
-  total smallint generated always as (f1 + coalesce(f2, 0) + coalesce(f3, 0) + f4 + f5 + f6) stored,
+  total smallint generated always as (f1 + coalesce(f2, 0) + coalesce(f3, 0) + coalesce(f4, 0) + f5 + f6) stored,
   data_access_stable boolean not null default false,
-  verdict text
+  verdict text,
+  verified boolean not null default false
+);
+
+create table if not exists industry_seeds (
+  id bigint generated always as identity primary key,
+  ksic_code text not null unique,
+  ksic_name text not null,
+  done boolean not null default false,
+  translation jsonb,
+  translated_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists query_discoveries (
+  id bigint generated always as identity primary key,
+  origin text not null check (origin in ('cafe','text_mining','industry')),
+  term text not null,
+  category text not null,
+  source_ref text not null default '',
+  frequency integer not null default 1 check (frequency >= 0),
+  approved_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique(origin, term, category, source_ref)
 );
 
 create table if not exists decisions (
@@ -110,4 +134,6 @@ create index if not exists pain_points_cluster_idx on pain_points(cluster_id);
 create index if not exists pain_points_recurrence_idx on pain_points(recurrence_count desc);
 create index if not exists raw_items_collected_idx on raw_items(collected_at desc);
 create index if not exists decisions_pain_point_idx on decisions(pain_point_id, decided_at desc);
+create index if not exists query_discoveries_pending_idx on query_discoveries(origin, approved_at, frequency desc);
+create index if not exists industry_seeds_round_robin_idx on industry_seeds(done, created_at, id);
 create index if not exists pain_points_embedding_idx on pain_points using hnsw (embedding vector_cosine_ops);

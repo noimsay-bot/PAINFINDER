@@ -74,7 +74,7 @@ async function processRow(row: Row, index: number) {
       cost += calculateLlmCost(verification.usage.model, verification.usage.inputTokens, verification.usage.outputTokens) ?? 0;
     }
 
-    const f4 = scoreMarket(verification.verdict);
+    const f4 = scoreMarket(verification.verdict) ?? 0;
     const f5 = Math.max(score.f5, verification.verdict === "paid_exists" || verification.verdict === "crowded" ? 1 : 0);
     await supabaseRest(`competitors?pain_point_id=eq.${encodeURIComponent(String(row.id))}`, { method: "DELETE" });
     if (verification.products.length) {
@@ -83,7 +83,7 @@ async function processRow(row: Row, index: number) {
     await supabaseRest("scores?on_conflict=pain_point_id", {
       method: "POST",
       headers: { Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify({ pain_point_id: row.id, f1: score.f1, f2: score.f2, f3: score.f3, f4, f5, f6: score.f6, data_access_stable: score.data_access_stable, verdict: verification.verdict }),
+      body: JSON.stringify({ pain_point_id: row.id, f1: score.f1, f2: score.f2, f3: score.f3, f4, f5, f6: score.f6, data_access_stable: score.data_access_stable, verdict: verification.verdict, verified: true }),
     });
     const newTotal = score.f1 + score.f2 + score.f3 + f4 + f5 + score.f6;
     after.push(newTotal);

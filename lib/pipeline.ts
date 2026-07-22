@@ -311,7 +311,7 @@ export async function runPipeline(input: RunConfig) {
       recordUsage(completion);
       analysis = normalizeAnalysis(JSON.parse(completion.text) as Partial<Analysis>, raw);
     } catch (error) { stopAfterItem = noteLlmError("llm2", error); }
-    const marketVerdict: MarketVerdict = "empty";
+    const marketVerdict: MarketVerdict = "unverified";
     analyses.push({
       raw,
       analysis,
@@ -329,8 +329,10 @@ export async function runPipeline(input: RunConfig) {
       const candidate = analyses[appIndex++];
       const appVerification = await searchAppMarket(candidate.analysis.domain);
       candidate.competitors = appVerification.products;
-      candidate.marketVerdict = appVerification.verdict;
-      candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: candidate.marketVerdict, buyerContext: candidate.analysis.buyer_context });
+      // App-market lookup is only a partial input. Until precision verification
+      // finishes, the market state and incumbent score must remain unknown.
+      candidate.marketVerdict = "unverified";
+      candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: "unverified", buyerContext: candidate.analysis.buyer_context });
       verificationCounts.appProduct += appVerification.counts.appProduct;
       errors.push(...appVerification.errors);
     }
@@ -423,7 +425,7 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
     if (candidate.precisionVerified) painBody.precision_verified_at = new Date().toISOString();
     const painRows = await supabaseRest("pain_points", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(painBody) }) as Array<{ id: string }>;
     const painId = painRows?.[0]?.id; if (!painId) continue;
-    await supabaseRest("scores", { method: "POST", body: JSON.stringify({ pain_point_id: painId, f1: candidate.scores.f1, f2: null, f3: null, f4: candidate.scores.f4, f5: candidate.scores.f5, f6: candidate.scores.f6, data_access_stable: true, verdict: candidate.marketVerdict }) });
+    await supabaseRest("scores", { method: "POST", body: JSON.stringify({ pain_point_id: painId, f1: candidate.scores.f1, f2: null, f3: null, f4: candidate.scores.f4, f5: candidate.scores.f5, f6: candidate.scores.f6, data_access_stable: true, verdict: candidate.marketVerdict, verified: candidate.precisionVerified }) });
     if (candidate.competitors.length) await supabaseRest("competitors", { method: "POST", body: JSON.stringify(candidate.competitors.map(c => ({ ...c, pain_point_id: painId }))) });
   }
   return runId;

@@ -27,7 +27,7 @@ function sourceTone(source: string) {
 }
 
 function marketVerdict(value: unknown): MarketVerdict {
-  return ["empty", "all_free", "public_owned", "paid_exists", "crowded"].includes(String(value))
+  return ["unverified", "empty", "all_free", "public_owned", "paid_exists", "crowded"].includes(String(value))
     ? String(value) as MarketVerdict
     : "empty";
 }
@@ -56,6 +56,9 @@ export async function GET() {
         source: String(rival.source ?? "web"),
       }));
       const legacyScore = (score.f2 !== null && score.f2 !== undefined) || (score.f3 !== null && score.f3 !== undefined);
+      const precisionVerified = Boolean(row.precision_verified_at);
+      const incumbentScore = score.f4 === null || score.f4 === undefined ? null : Number(score.f4);
+      const storedTotal = Number(score.total ?? 0);
       return {
         id: String(row.id),
         summary: String(row.pain_summary ?? "요약 없음"),
@@ -63,11 +66,11 @@ export async function GET() {
         source: sourceLabel(source),
         sourceTone: sourceTone(source),
         time: relativeTime(raw.posted_at ?? row.created_at),
-        score: Number(score.total ?? 0),
-        scoreMax: legacyScore ? 12 : 10,
+        score: precisionVerified ? storedTotal : Math.max(0, storedTotal - (incumbentScore ?? 0)),
+        scoreMax: precisionVerified ? (legacyScore ? 12 : 10) : (legacyScore ? 9 : 7),
         competitors: rivals.length,
-        marketVerdict: marketVerdict(score.verdict),
-        precisionVerified: Boolean(row.precision_verified_at),
+        marketVerdict: precisionVerified ? marketVerdict(score.verdict) : "unverified",
+        precisionVerified,
         precisionVerifiedAt: row.precision_verified_at ? String(row.precision_verified_at) : null,
         decision: String(latest.action ?? "unreviewed"),
         decisionReason: latest.reason ? String(latest.reason) : null,
@@ -82,14 +85,15 @@ export async function GET() {
         access: Boolean(score.data_access_stable),
         scores: [
           { label: "AI 대체 불가성", value: Number(score.f1 ?? 0), max: 2 },
-          { label: "인컴번트 상태", value: Number(score.f4 ?? 0), max: 3 },
+          { label: "인컴번트 상태", value: precisionVerified ? incumbentScore : null, max: 3 },
           { label: "지불 의향", value: Number(score.f5 ?? 0), max: 3 },
           { label: "유지보수 부담", value: Number(score.f6 ?? 0), max: 2 },
         ],
         rivals,
         url: String(raw.url ?? ""),
+        createdAt: String(row.created_at ?? ""),
       };
-    });
+    }).sort((a, b) => Number(b.precisionVerified) - Number(a.precisionVerified) || b.score - a.score || b.createdAt.localeCompare(a.createdAt));
 
     const logs = (logRows ?? []).map((row) => ({
       id: String(row.id),
