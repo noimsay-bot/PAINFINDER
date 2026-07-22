@@ -175,6 +175,26 @@ function fallbackAnalysis(item: RawSignal): Analysis {
   return { pain_summary: item.title || item.body.slice(0, 90), who: "확인 필요", current_workaround: null, frequency: "occasional", money_signal: null, search_terms_for_verification: [item.title], domain: "미분류" };
 }
 
+function normalizeAnalysis(value: Partial<Analysis>, item: RawSignal): Analysis {
+  const fallback = fallbackAnalysis(item);
+  const frequencies = new Set<Analysis["frequency"]>(["daily", "weekly", "monthly", "occasional"]);
+  const frequency = frequencies.has(value.frequency as Analysis["frequency"])
+    ? value.frequency as Analysis["frequency"]
+    : "occasional";
+  const searchTerms = Array.isArray(value.search_terms_for_verification)
+    ? value.search_terms_for_verification.map(String).map(term => term.trim()).filter(Boolean).slice(0, 3)
+    : fallback.search_terms_for_verification;
+  return {
+    pain_summary: String(value.pain_summary ?? fallback.pain_summary),
+    who: String(value.who ?? fallback.who),
+    current_workaround: value.current_workaround ? String(value.current_workaround) : null,
+    frequency,
+    money_signal: value.money_signal ? String(value.money_signal) : null,
+    search_terms_for_verification: searchTerms.length ? searchTerms : fallback.search_terms_for_verification,
+    domain: String(value.domain ?? fallback.domain),
+  };
+}
+
 export async function runPipeline(input: RunConfig) {
   const config = normalizeConfig(input);
   const startedAt = new Date().toISOString();
@@ -255,7 +275,7 @@ export async function runPipeline(input: RunConfig) {
       });
       llm2Calls++;
       recordUsage(completion);
-      analysis = JSON.parse(completion.text) as Analysis;
+      analysis = normalizeAnalysis(JSON.parse(completion.text) as Partial<Analysis>, raw);
     } catch (error) { stopAfterItem = noteLlmError("llm2", error); }
     const competitors: Array<Record<string, unknown>> = [];
     if (verifyCalls < DEFAULT_LIMITS.VERIFY_MAX_PER_RUN && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) {
