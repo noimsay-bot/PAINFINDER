@@ -1,0 +1,299 @@
+PAINFINDER 현재 구현 상황 인수인계
+작성일: 2026-07-22 (Asia/Seoul)
+
+============================================================
+1. 프로젝트 개요
+============================================================
+
+- 제품명: Painfinder / 페인포인트 발굴 도구
+- 용도: 개인용 리서치 도구. 사용자 1명이며 로그인, 결제, 마케팅 페이지는 없음.
+- 작업 경로: C:\Users\Jnote\Desktop\pain point
+- 운영 주소: https://painfinder-murex.vercel.app
+- Vercel 프로젝트: painfinder
+- 현재 브랜치: main
+- 최신 커밋: 07a8aff Normalize LLM analysis before persistence
+- 마지막 확인 결과: Next.js 프로덕션 빌드 성공, Vercel 배포 성공, 운영 홈 HTTP 200
+
+핵심 요구사항 변화:
+- 최초에는 업종/도메인과 쿼리 패밀리를 조합하는 방식이었음.
+- 현재는 사용자가 검색어를 직접 입력하는 방식으로 변경됨.
+- 입력한 검색어는 자동 조합하거나 변형하지 않고 선택한 검색 소스에 그대로 전달함.
+- 하드코딩된 후보, 반복 신호, 실행 로그 등 샘플 레코드는 모두 제거함.
+
+
+============================================================
+2. 기술 구성
+============================================================
+
+- Next.js 16.2.6 App Router
+- React 19.2.6
+- TypeScript 5.9.3
+- 데이터베이스: Supabase PostgreSQL + PostgREST
+- 배포: Vercel
+- 수집 API: 네이버 검색 API, Hacker News Algolia API, Threads API, iTunes 리뷰 수집 코드
+- 분석 API: OpenAI Chat Completions API가 기본 공급자. Anthropic 어댑터는 롤백용으로 유지.
+- 스타일: app/globals.css 단일 전역 CSS 중심
+
+주의:
+- package.json의 기본 build 스크립트는 vinext이지만 Vercel은 vercel.json에 따라 `npx next build`를 사용함.
+- 프로젝트에 .openai/hosting.json도 존재하지만 현재 실제 운영 배포 대상은 Vercel임.
+
+
+============================================================
+3. 주요 파일
+============================================================
+
+- app/page.tsx
+  전체 대시보드 UI와 클라이언트 상태를 담당함.
+  메뉴: 오늘의 후보, 반복 신호, 실행 설정, 보류함, 실행 로그.
+
+- app/globals.css
+  전체 UI 스타일. 이전 요청에 따라 전반적인 글자 크기를 키운 상태.
+
+- lib/pipeline.ts
+  실행 설정 정규화, 검색어 전달, 소스별 수집, 중복 제거, 잡음 제거,
+  공급자 독립 1차/2차 분석, 경쟁 검색, 점수 계산, Supabase 저장을 담당함.
+
+- lib/llm/
+  index.ts가 LLM_PROVIDER에 따라 공급자를 선택함.
+  openai.ts는 Chat Completions와 오류별 최대 1회 재시도를 구현함.
+  anthropic.ts는 기존 Anthropic 구현을 롤백용으로 보존함.
+  pricing.ts는 실제 입력/출력 토큰 기반 비용을 계산함.
+  types.ts는 공통 LlmProvider 인터페이스와 오류 형식을 정의함.
+
+- lib/naver.ts
+  네이버 검색 API 호출과 HTML 엔티티/태그 정리.
+
+- lib/limits.ts
+  실행당 검색어, 소스별 수집량, LLM 호출 수, 비용의 기본/하드 상한.
+
+- app/api/run/route.ts
+  수동 실행 API. 파이프라인을 실행하고 결과를 Supabase에 저장함.
+
+- app/api/cron/route.ts
+  CRON_SECRET Bearer 인증 후 기본 설정을 읽어 자동 실행함.
+
+- app/api/dashboard/route.ts
+  Supabase의 실제 후보/점수/경쟁사/판정/실행 로그를 UI 형식으로 변환함.
+
+- app/api/configs/route.ts
+  실행 설정 조회 및 저장.
+
+- app/api/decisions/route.ts
+  tracking, holding, rejected, unreviewed 판정을 Supabase에 추가 저장함.
+
+- supabase/schema.sql
+  run_configs, seed_queries, run_logs, raw_items, pain_points,
+  competitors, scores, decisions 테이블과 인덱스 정의.
+
+- vercel.json
+  Next.js 빌드 설정과 매일 23:00 UTC(한국시간 오전 8시) Cron 설정.
+
+
+============================================================
+4. 현재 UI 동작
+============================================================
+
+오늘의 후보
+- /api/dashboard에서 실제 Supabase 데이터만 불러옴.
+- 후보가 없으면 첫 실행 안내 화면을 표시함.
+- 후보 검색, 소스 필터, 상세 분석, 경쟁사, 점수 표시.
+- 키보드: J/K 이동, T 추적, H 보류, X 기각, Enter 원문 열기.
+- 판정은 /api/decisions로 저장함.
+
+반복 신호
+- recurrence_count가 2 이상인 실제 후보만 표시함.
+- 데이터가 없으면 빈 상태 안내를 표시함.
+
+실행 설정
+- 프리셋, 업종, 수집 모드, 쿼리 패밀리 UI는 제거됨.
+- 검색어 입력 후 Enter 또는 추가 버튼으로 등록.
+- 쉼표로 여러 검색어를 한 번에 추가할 수 있음.
+- 중복 제거, 최대 50개.
+- 기본 검색 소스: 네이버카페, 지식iN, 블로그.
+- 추가 선택 가능: 웹문서, Threads, HN.
+- 검색어 또는 검색 소스가 없으면 저장/실행을 차단하고 안내함.
+- 실행 이름은 내부적으로 `직접 검색`으로 저장함.
+
+보류함
+- holding/rejected 판정이 있는 실제 후보만 표시함.
+- 판정 사유와 판정일 표시.
+
+실행 로그
+- Supabase run_logs의 실제 실행만 표시함.
+- 수집/룰 통과/1차 통과/2차 분석/검증 완료 수치와 비용, 오류를 표시함.
+- 오류가 존재하는 완료 기록은 화면상 `중단`으로 분류함.
+
+
+============================================================
+5. 직접 검색어 방식의 데이터 흐름
+============================================================
+
+1) 사용자가 app/page.tsx에서 검색어 목록을 등록함.
+2) /api/run 요청 본문의 `queries` 배열로 전달함.
+3) normalizeConfig가 공백 제거, 빈 값 제거, 중복 제거를 수행함.
+4) makeQueries는 queries를 수정하지 않고 최대 실행 개수까지만 자름.
+5) 선택한 각 소스에 각 검색어를 그대로 전달함.
+6) 수집된 결과는 source + source_id 기준으로 중복 제거함.
+7) 짧은 글, 광고성 문구, 제외 분야 등 잡음을 코드 규칙으로 제거함.
+8) Anthropic Haiku가 1차 후보 판정을 수행함.
+9) 통과 항목을 Haiku가 구조화 분석함.
+10) 네이버 웹 검색으로 경쟁 제품을 확인함.
+11) raw_items, pain_points, scores, competitors, run_logs에 저장함.
+
+DB 호환성 메모:
+- Supabase run_configs 테이블에는 아직 `queries` 컬럼이 없음.
+- 새 검색어 배열은 기존 `domains` JSONB 컬럼에 저장함.
+- normalizeConfig는 `queries`가 없으면 기존 `domains` 값을 검색어로 읽음.
+- 따라서 현재 DB 스키마 변경 없이 동작하며, 기존 domains 값도 이제 정확한 검색어로 취급됨.
+
+
+============================================================
+6. 환경 변수 상태
+============================================================
+
+.env.local과 Vercel Production에 아래 변수가 설정되어 있음.
+값은 이 문서에 절대 기록하지 않음.
+
+- NEXT_PUBLIC_SUPABASE_URL
+- NEXT_PUBLIC_SUPABASE_ANON_KEY
+- SUPABASE_SERVICE_ROLE_KEY
+- NAVER_CLIENT_ID
+- NAVER_CLIENT_SECRET
+- ANTHROPIC_API_KEY
+- OPENAI_API_KEY
+- LLM_PROVIDER=openai
+- OPENAI_MODEL_STAGE1=gpt-5.4-mini
+- OPENAI_MODEL_STAGE2=gpt-5.4-mini
+- CRON_SECRET
+
+CRON_SECRET은 생성 완료된 43자 값임.
+
+Supabase 관련 메모:
+- 새 형식의 sb_secret_* 키를 지원함.
+- sb_secret_* 키는 apikey 헤더로만 전달함.
+- 구형 JWT 서비스 역할 키(eyJ로 시작)만 Authorization Bearer 헤더를 함께 사용함.
+- Supabase 스키마는 현재 적용되어 있고 REST 조회가 정상 동작함.
+
+Threads 관련 메모:
+- THREADS_ACCESS_TOKEN은 현재 설정되지 않음.
+- UI에서 Threads를 선택할 수 있지만 실행 시 access-token-missing 오류가 로그에 남음.
+
+
+============================================================
+7. LLM 공급자 전환 상태
+============================================================
+
+OpenAI 전환과 운영 배포가 완료됨.
+- 기본 공급자: openai
+- 1차/2차 기본 모델: gpt-5.4-mini
+- 실제 API 응답 모델: gpt-5.4-mini-2026-03-17
+- Chat Completions JSON 모드 사용. 1차 결과는 {"results":[...]} 객체로 래핑함.
+- 입력/출력 토큰을 실제 usage에서 읽어 비용을 계산함.
+- 401, 400, insufficient_quota는 재시도하지 않음.
+- rate_limit_exceeded와 5xx만 1회 재시도함.
+- Anthropic 코드는 삭제하지 않고 lib/llm/anthropic.ts에 보존함.
+
+실제 100건 검증 결과:
+- 수집 100, 규칙 통과 98, 1차 통과 40, 2차 분석 40, 경쟁 검증 20
+- 입력 토큰 21,622, 출력 토큰 9,626
+- 실제 토큰 기반 비용 $0.0595
+- 오류 0, 중단 사유 없음
+
+
+============================================================
+8. DB에 남아 있는 실제 상태
+============================================================
+
+- 하드코딩 샘플 데이터는 없음.
+- Anthropic 실패 로그와 OpenAI 401 검증 로그는 실제 실행 기록으로 보존됨.
+- OpenAI 성공 실행으로 pain_points 실제 레코드가 저장됨.
+- 마지막 확인 시 대시보드 후보 45건 이상이 표시됨.
+- 운영 배포 후 1건 스모크 테스트도 수집/1차/2차 모두 성공했고 비용은 $0.0014였음.
+- 모든 기록은 샘플이 아니므로 임의 삭제하지 않았음.
+
+
+============================================================
+9. 알려진 구현 한계 / 다음 작업 권장 순서
+============================================================
+
+우선순위 1: 하드 상한 입력을 실제 상태와 연결
+- 현재 UI의 소스별 수집 상한과 일일 비용 상한 input은 시각 요소만 있음.
+- configBody는 itemsPerSource 500, dailyCostUsd 3으로 고정 전달함.
+- 사용자가 숫자를 바꾸어도 현재 실행에는 반영되지 않음.
+- React state로 연결해야 함.
+
+우선순위 2: 설정 저장/불러오기 완성
+- 설정 저장은 매번 run_configs에 새 row를 추가함.
+- 저장된 설정을 UI에서 다시 불러오거나 수정하는 기능은 없음.
+- UI를 새로 열면 검색어 목록은 다시 빈 배열에서 시작함.
+- 실행 설정 POST는 is_default=false로 저장함.
+
+우선순위 3: Cron 기본 설정 처리
+- /api/cron은 is_default=true 설정 1개를 찾음.
+- 현재 UI 저장은 is_default=false이므로 자동 실행용 기본 설정이 없을 수 있음.
+- 검색어 없는 설정으로 Cron이 실행되면 `검색어를 1개 이상 입력해 주세요.` 오류가 발생함.
+- 기본 설정 지정 UI/API 또는 명확한 fallback이 필요함.
+
+우선순위 4: 검색 기간 실제 적용
+- period_days는 설정 구조에 존재하지만 수집 결과 필터링에 실제 사용되지 않음.
+- 오해 방지를 위해 현재 UI에서는 기간 선택을 제거함.
+
+우선순위 5: 소스별 완성도
+- 네이버카페/지식iN/블로그/웹문서: 구현됨.
+- HN: 구현됨. 한국어 검색어의 실효성은 낮을 수 있음.
+- Threads: 코드 구현됨. 액세스 토큰 필요.
+- 앱 리뷰: 수집 코드가 있지만 앱 목록 관리 UI는 없고 현재 검색어 UI에서는 소스 선택을 제거함.
+
+우선순위 6: 모델 설정 정리
+- model_stage1/model_stage2는 공급자 선택 후 실제 LLM 호출에 사용됨.
+- DB의 기존 Claude 모델명은 읽을 때 OpenAI 단계별 모델로 자동 치환됨.
+- model_verify 필드는 설정/DB에는 있으나 현재 경쟁 검증은 네이버 검색으로 수행하여 LLM 검증 모델은 사용하지 않음.
+- 이전 모델 선택 UI는 실제 state와 연결되지 않아 이번 단순화 때 제거함.
+
+우선순위 7: 추가 모델 가격 관리
+- gpt-5.4-mini와 gpt-5.5 계열 가격은 lib/llm/pricing.ts에 등록됨.
+- 가격이 등록되지 않은 모델은 비용 0으로 처리하고 warning:pricing 로그를 남김.
+- 새 모델을 환경변수로 지정할 때 pricing.ts에도 단가를 추가할 것.
+
+
+============================================================
+10. 실행 및 배포 참고
+============================================================
+
+로컬 프로덕션 검증:
+- npx next build
+
+Vercel 운영 배포:
+- npx vercel --prod --yes
+
+운영 별칭:
+- https://painfinder-murex.vercel.app
+
+Cron:
+- Vercel schedule: 0 23 * * *
+- UTC 23:00 = 한국시간 다음 날 오전 8:00
+- 호출 경로: /api/cron
+- Authorization: Bearer <CRON_SECRET>
+
+최근 핵심 커밋:
+- 9b849ec 직접 검색어 방식으로 전환
+- f384453 Anthropic 결제/크레딧 오류를 명확히 기록
+- b9bc534 샘플 데이터 제거 및 Supabase 실제 데이터 연결
+- edf7b66 Vercel 배포 설정
+- 3430c5d Supabase 신규 secret key 형식 지원
+
+
+============================================================
+11. 작업 시 주의사항
+============================================================
+
+- .env.local의 실제 키 값을 출력하거나 커밋하지 말 것.
+- 사용자가 요청하지 않은 실제 Supabase 실행 로그를 삭제하지 말 것.
+- 배포 전 `npx next build`로 Next.js/TypeScript 검증할 것.
+- Vercel 운영 별칭이 painfinder-murex.vercel.app으로 유지되는지 확인할 것.
+- 현재 사용자의 의도는 업종 자동 조합이 아니라 검색어 직접 입력임.
+- 검색어를 임의 확장, 추천, 접두어 결합하지 말 것.
+- 로그인/결제/마케팅 페이지를 추가하지 말 것.
+
+문서 끝.
