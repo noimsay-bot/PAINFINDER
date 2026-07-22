@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 type View = "today" | "signals" | "settings" | "archive" | "logs";
 type Decision = "unreviewed" | "tracking" | "holding" | "rejected";
+type MarketVerdict = "empty" | "all_free" | "public_owned" | "paid_exists" | "crowded";
+type CompetitorPricing = "free" | "freemium" | "paid" | "public" | "unknown";
 
 type Candidate = {
   id: string;
@@ -14,6 +16,7 @@ type Candidate = {
   time: string;
   score: number;
   competitors: number;
+  marketVerdict: MarketVerdict;
   decision: Decision;
   domain: string;
   frequency: string;
@@ -24,7 +27,7 @@ type Candidate = {
   recurrence: number;
   access: boolean;
   scores: { label: string; value: number }[];
-  rivals: { name: string; pricing: string; note: string; state: "old" | "paid" | "free" }[];
+  rivals: { name: string; url: string; pricing: CompetitorPricing; note: string; state: CompetitorPricing }[];
   url: string;
   decisionReason?: string | null;
   decidedAt?: string | null;
@@ -53,6 +56,14 @@ const NAV: { id: View; label: string; mark: string; count?: number }[] = [
 
 const STATUS_LABEL: Record<Decision, string> = {
   unreviewed: "미검토", tracking: "추적", holding: "보류", rejected: "기각",
+};
+
+const MARKET_LABEL: Record<MarketVerdict, string> = {
+  paid_exists: "유료 존재", crowded: "붐빔", all_free: "전부 무료", public_owned: "공공 제공", empty: "경쟁자 없음",
+};
+
+const PRICING_LABEL: Record<CompetitorPricing, string> = {
+  free: "무료", freemium: "부분 무료", paid: "유료", public: "공공 제공", unknown: "가격 미확인",
 };
 
 function ScoreGauge({ score }: { score: number }) {
@@ -187,7 +198,7 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
         {visible.map(item => <button key={item.id} className={`candidate-row ${selected.id === item.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}>
           <div className="row-status"><i className={`status-dot ${item.decision}`} /><ScoreGauge score={item.score} /></div>
           <div className="row-main"><h3>{item.summary}</h3><div><span className={`source-tag ${item.sourceTone}`}>{item.source}</span><span>{item.domain}</span><span>{item.time}</span>{item.recurrence >= 3 && <span className="repeat-tag">↻ {item.recurrence}회 반복</span>}</div></div>
-          <div className="row-rival"><strong>{item.competitors}</strong><span>경쟁자</span></div>
+          <div className={`market-badge ${item.marketVerdict}`}>{MARKET_LABEL[item.marketVerdict]}{item.marketVerdict !== "empty" && item.marketVerdict !== "public_owned" ? ` (${item.competitors})` : ""}</div>
           <span className={`status-label ${item.decision}`}>{STATUS_LABEL[item.decision]}</span>
         </button>)}
         {visible.length === 0 && <div className="empty">조건에 맞는 후보가 없습니다.</div>}
@@ -199,9 +210,9 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
         <div className="detail-kicker"><span className={`source-tag ${selected.sourceTone}`}>{selected.source}</span><span>{selected.time}</span><span>ID · PF-{String(selected.id).padStart(4, "0")}</span></div>
         <div className="detail-title"><div><h2>{selected.summary}</h2><p>{selected.who} · {selected.frequency} 발생</p></div><ScoreGauge score={selected.score} /></div>
         <section className="detail-section original"><header><h3>원문 신호</h3><a href={selected.url} target="_blank" rel="noreferrer">원문 열기 ↗</a></header><blockquote>“{selected.excerpt}”</blockquote></section>
-        <section className="detail-section analysis"><header><h3>LLM 분석</h3><span>HAIKU · 1.2s</span></header><dl><div><dt>누가</dt><dd>{selected.who}</dd></div><div><dt>현재 우회 수단</dt><dd>{selected.workaround}</dd></div><div><dt>신호 유형</dt><dd><span className="amber-text">{selected.signal}</span> · {selected.frequency}</dd></div><div><dt>지불 신호</dt><dd>{selected.money ? `“${selected.money}”` : <span className="muted">명시적 신호 없음</span>}</dd></div></dl></section>
-        <section className="detail-section competitors"><header><h3>경쟁 검증 <b>{selected.rivals.length}</b></h3><span className={selected.rivals.length === 0 ? "warn" : "verified"}>{selected.rivals.length === 0 ? "⚠ 빈 시장 경계" : "✓ 검색 완료"}</span></header>
-          {selected.rivals.length ? <div className="rival-list">{selected.rivals.map(r => <a key={r.name} href={`https://www.google.com/search?q=${encodeURIComponent(r.name)}`} target="_blank" rel="noreferrer"><i className={`rival-state ${r.state}`} /> <strong>{r.name}</strong><span>{r.pricing}</span><p>{r.note}</p><em>↗</em></a>)}</div> : <div className="zero-rivals"><strong>찾은 경쟁자가 없습니다.</strong><p>자동 합격이 아닙니다. 수요가 형성되지 않은 시장일 수 있어 직접 확인이 필요합니다.</p></div>}
+        <section className="detail-section analysis"><header><h3>LLM 분석</h3><span>구조화 분석 완료</span></header><dl><div><dt>누가</dt><dd>{selected.who}</dd></div><div><dt>현재 우회 수단</dt><dd>{selected.workaround}</dd></div><div><dt>신호 유형</dt><dd><span className="amber-text">{selected.signal}</span> · {selected.frequency}</dd></div><div><dt>지불 신호</dt><dd>{selected.money ? `“${selected.money}”` : <span className="muted">명시적 신호 없음</span>}</dd></div></dl></section>
+        <section className="detail-section competitors"><header><h3>경쟁 검증 <b>{selected.rivals.length}</b></h3><span className={`market-badge ${selected.marketVerdict}`}>{MARKET_LABEL[selected.marketVerdict]}</span></header>
+          {selected.rivals.length ? <div className="rival-list">{selected.rivals.map(r => <a key={r.url || r.name} href={r.url} target="_blank" rel="noreferrer"><i className={`rival-state ${r.state}`} /> <strong>{r.name}</strong><span className={`pricing-badge ${r.pricing}`}>{PRICING_LABEL[r.pricing]}</span><p>{r.note}</p><em>↗</em></a>)}</div> : <div className="zero-rivals"><strong>확인된 제품 경쟁자가 없습니다.</strong><p>자동 합격이 아닙니다. 수요가 형성되지 않은 시장일 수 있어 직접 확인이 필요합니다.</p></div>}
         </section>
         <section className="detail-section scorecard"><header><h3>6개 필터</h3><span>{selected.score} / 12점</span></header><div className="score-grid">{selected.scores.map(s => <div key={s.label}><span>{s.label}</span><div className="score-track"><i style={{ width: `${s.value * 50}%` }} /></div><b>{s.value}</b></div>)}</div><div className={`access-flag ${selected.access ? "stable" : "unstable"}`}><span>{selected.access ? "✓" : "!"}</span><div><strong>데이터 접근 {selected.access ? "안정" : "불안정"}</strong><small>{selected.access ? "공식 API 또는 공개 데이터 확인" : "공식 API가 없어 별도 검토 필요"}</small></div></div></section>
       </div>

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseRest } from "@/lib/pipeline";
+import type { MarketVerdict } from "@/lib/competitors";
 
 type Row = Record<string, unknown>;
 
@@ -25,6 +26,12 @@ function sourceTone(source: string) {
   return ({ cafearticle: "cafe", kin: "kin", blog: "blog", appstore: "app", threads: "threads", hn: "hn" } as Record<string, string>)[source] ?? "web";
 }
 
+function marketVerdict(value: unknown): MarketVerdict {
+  return ["empty", "all_free", "public_owned", "paid_exists", "crowded"].includes(String(value))
+    ? String(value) as MarketVerdict
+    : "empty";
+}
+
 export async function GET() {
   try {
     const [painRows, logRows] = await Promise.all([
@@ -44,7 +51,7 @@ export async function GET() {
         url: String(rival.url ?? ""),
         pricing: String(rival.pricing ?? "가격 미확인"),
         note: String(rival.quality_note ?? "검토 메모 없음"),
-        state: /무료/.test(String(rival.pricing ?? "")) ? "free" : /업데이트|구식|중단/.test(String(rival.quality_note ?? "")) ? "old" : "paid",
+        state: String(rival.pricing ?? "unknown"),
       }));
       return {
         id: String(row.id),
@@ -55,7 +62,8 @@ export async function GET() {
         time: relativeTime(raw.posted_at ?? row.created_at),
         score: Number(score.total ?? 0),
         competitors: rivals.length,
-        decision: String(latest.action ?? score.verdict ?? "unreviewed"),
+        marketVerdict: marketVerdict(score.verdict),
+        decision: String(latest.action ?? "unreviewed"),
         decisionReason: latest.reason ? String(latest.reason) : null,
         decidedAt: latest.decided_at ? String(latest.decided_at) : null,
         domain: String(row.domain ?? "미분류"),

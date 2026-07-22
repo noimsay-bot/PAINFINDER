@@ -1,4 +1,5 @@
 import { DEFAULT_LIMITS, HARD_LIMITS } from "./limits";
+import { scoreMarket, verifyMarket, type MarketVerdict, type ProductCompetitor, type VerificationCounts } from "./competitors";
 import { getLlmProvider, LlmProviderError, resolveLlmModel, type LlmResult } from "./llm";
 import { calculateLlmCost } from "./llm/pricing";
 import { normalizeNaverText, searchNaver, type NaverSearchType } from "./naver";
@@ -207,6 +208,7 @@ export async function runPipeline(input: RunConfig) {
   const llm = getLlmProvider();
   const stage1Model = resolveLlmModel(config.model_stage1, "stage1");
   const stage2Model = resolveLlmModel(config.model_stage2, "stage2");
+  const verifyModel = resolveLlmModel(config.model_verify, "stage2");
   const unknownPricing = new Set<string>();
   let inputTokens = 0;
   let outputTokens = 0;
@@ -226,7 +228,7 @@ export async function runPipeline(input: RunConfig) {
     runningCost += cost;
     if (runningCost >= config.limits.dailyCostUsd) stoppedReason = "daily_cost_ceiling";
   };
-  const noteLlmError = (stage: "llm1" | "llm2", error: unknown) => {
+  const noteLlmError = (stage: "llm1" | "llm2" | "verify", error: unknown) => {
     const message = error instanceof Error ? error.message : "failed";
     errors.push(`${stage}:${message}`);
     if (error instanceof LlmProviderError) {
@@ -259,8 +261,9 @@ export async function runPipeline(input: RunConfig) {
   }
   const passedIndexes = stage1.filter(x => x.pass).map(x => Number(x.id)).filter(Number.isFinite);
   const passed = passedIndexes.map(i => filtered[i]).filter(Boolean).slice(0, DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN);
-  const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: Array<Record<string, unknown>>; scores: number[] }> = [];
-  let llm2Calls = 0; let verifyCalls = 0;
+  const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: ProductCompetitor[]; marketVerdict: MarketVerdict; scores: number[] }> = [];
+  let llm2Calls = 0; let verifyCalls = 0; let verifiedItems = 0;
+  const verificationCounts: VerificationCounts = { urlExcluded: 0, product: 0, content: 0, irrelevant: 0, appProduct: 0 };
   for (const raw of passed) {
     if (stoppedReason) break;
     let analysis = fallbackAnalysis(raw);
@@ -277,22 +280,45 @@ export async function runPipeline(input: RunConfig) {
       recordUsage(completion);
       analysis = normalizeAnalysis(JSON.parse(completion.text) as Partial<Analysis>, raw);
     } catch (error) { stopAfterItem = noteLlmError("llm2", error); }
-    const competitors: Array<Record<string, unknown>> = [];
-    if (verifyCalls < DEFAULT_LIMITS.VERIFY_MAX_PER_RUN && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) {
-      for (const term of analysis.search_terms_for_verification.slice(0, 3)) {
-        try {
-          const found = await searchNaver({ type: "webkr", query: term, display: 5, sort: "sim", clientId: process.env.NAVER_CLIENT_ID, clientSecret: process.env.NAVER_CLIENT_SECRET });
-          for (const item of found) competitors.push({ name: item.title, url: item.link, pricing: null, quality_note: item.description, last_updated_signal: null });
-        } catch (error) { errors.push(`verify:${error instanceof Error ? error.message : "failed"}`); }
-      }
-      verifyCalls++;
+    let competitors: ProductCompetitor[] = [];
+    let marketVerdict: MarketVerdict = "empty";
+    if (verifiedItems < DEFAULT_LIMITS.VERIFY_MAX_PER_RUN && !stoppedReason) {
+      verifiedItems++;
+      try {
+        const verification = await verifyMarket({
+          searchTerms: analysis.search_terms_for_verification,
+          llm,
+          model: verifyModel,
+          naverClientId: process.env.NAVER_CLIENT_ID,
+          naverClientSecret: process.env.NAVER_CLIENT_SECRET,
+        });
+        competitors = verification.products;
+        marketVerdict = verification.verdict;
+        for (const key of Object.keys(verificationCounts) as Array<keyof VerificationCounts>) verificationCounts[key] += verification.counts[key];
+        errors.push(...verification.errors);
+        if (verification.usage) {
+          verifyCalls++;
+          recordUsage(verification.usage);
+        }
+      } catch (error) { stopAfterItem = noteLlmError("verify", error); }
     }
-    const uniqueCompetitors = [...new Map(competitors.map(c => [String(c.url), c])).values()].slice(0, 8);
-    const scores = [analysis.current_workaround ? 2 : 1, 1, 2, uniqueCompetitors.length > 1 ? 2 : 1, analysis.money_signal ? 2 : 0, 1];
-    analyses.push({ raw, analysis, competitors: uniqueCompetitors, scores });
+    const paidSignal = marketVerdict === "paid_exists" || marketVerdict === "crowded" ? 1 : 0;
+    const scores = [analysis.current_workaround ? 2 : 1, 1, 2, scoreMarket(marketVerdict), Math.max(analysis.money_signal ? 2 : 0, paidSignal), 1];
+    analyses.push({ raw, analysis, competitors, marketVerdict, scores });
     if (stopAfterItem) break;
   }
-  const stageCounts = { collected: deduped.length, rulePassed: filtered.length, llm1Passed: passed.length, llm2Analyzed: analyses.length, verified: analyses.filter(a => a.competitors.length > 0).length };
+  const stageCounts = {
+    collected: deduped.length,
+    rulePassed: filtered.length,
+    llm1Passed: passed.length,
+    llm2Analyzed: analyses.length,
+    verified: verifiedItems,
+    competitorUrlExcluded: verificationCounts.urlExcluded,
+    competitorProduct: verificationCounts.product + verificationCounts.appProduct,
+    competitorContent: verificationCounts.content,
+    competitorIrrelevant: verificationCounts.irrelevant,
+    competitorAppProduct: verificationCounts.appProduct,
+  };
   const costEstimate = Number(runningCost.toFixed(4));
   return { mode: "live", config, startedAt, endedAt: new Date().toISOString(), queries, stageCounts, llmCalls: { stage1: llm1Calls, stage2: llm2Calls, verify: verifyCalls, inputTokens, outputTokens }, costEstimate, stoppedReason, errors, candidates: analyses };
 }
@@ -320,7 +346,8 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
     const rawId = rawRows?.[0]?.id; if (!rawId) continue;
     const painRows = await supabaseRest("pain_points?on_conflict=raw_item_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ raw_item_id: rawId, pain_summary: candidate.analysis.pain_summary, who: candidate.analysis.who, current_workaround: candidate.analysis.current_workaround, frequency: candidate.analysis.frequency, money_signal: candidate.analysis.money_signal, domain: candidate.analysis.domain, signal_type: "llm_pass" }) }) as Array<{ id: string }>;
     const painId = painRows?.[0]?.id; if (!painId) continue;
-    await supabaseRest("scores?on_conflict=pain_point_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify({ pain_point_id: painId, f1: candidate.scores[0], f2: candidate.scores[1], f3: candidate.scores[2], f4: candidate.scores[3], f5: candidate.scores[4], f6: candidate.scores[5], data_access_stable: true, verdict: "unreviewed" }) });
+    await supabaseRest("scores?on_conflict=pain_point_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify({ pain_point_id: painId, f1: candidate.scores[0], f2: candidate.scores[1], f3: candidate.scores[2], f4: candidate.scores[3], f5: candidate.scores[4], f6: candidate.scores[5], data_access_stable: true, verdict: candidate.marketVerdict }) });
+    await supabaseRest(`competitors?pain_point_id=eq.${encodeURIComponent(painId)}`, { method: "DELETE" });
     if (candidate.competitors.length) await supabaseRest("competitors", { method: "POST", body: JSON.stringify(candidate.competitors.map(c => ({ ...c, pain_point_id: painId }))) });
   }
   return runId;
