@@ -66,6 +66,74 @@ const PRICING_LABEL: Record<CompetitorPricing, string> = {
   free: "무료", freemium: "부분 무료", paid: "유료", public: "공공 제공", unknown: "가격 미확인",
 };
 
+function buildCandidatesText(items: Candidate[]) {
+  const createdAt = new Date().toLocaleString("ko-KR");
+  const sections = items.map((item, index) => {
+    const scores = item.scores.map(score => `- ${score.label}: ${score.value}/2`).join("\n");
+    const rivals = item.rivals.length
+      ? item.rivals.map((rival, rivalIndex) => [
+          `  ${rivalIndex + 1}. ${rival.name}`,
+          `     가격: ${PRICING_LABEL[rival.pricing]}`,
+          `     설명: ${rival.note}`,
+          `     URL: ${rival.url}`,
+        ].join("\n")).join("\n")
+      : "  확인된 제품 경쟁자 없음";
+
+    return [
+      `================ 후보 ${String(index + 1).padStart(2, "0")} ================`,
+      `ID: PF-${item.id}`,
+      `요약: ${item.summary}`,
+      `대상: ${item.who}`,
+      `분야: ${item.domain}`,
+      `출처: ${item.source}`,
+      `발생 빈도: ${item.frequency}`,
+      `신호 유형: ${item.signal}`,
+      `반복 횟수: ${item.recurrence}회`,
+      `현재 판정: ${STATUS_LABEL[item.decision]}`,
+      `시장 판정: ${MARKET_LABEL[item.marketVerdict]} (${item.competitors}개)`,
+      `총점: ${item.score}/12`,
+      "",
+      "[원문 신호]",
+      item.excerpt,
+      `원문 URL: ${item.url || "없음"}`,
+      "",
+      "[LLM 분석]",
+      `현재 우회 수단: ${item.workaround}`,
+      `지불 신호: ${item.money ?? "명시적 신호 없음"}`,
+      "",
+      "[6개 필터 점수]",
+      scores,
+      "",
+      "[확인된 제품 경쟁자]",
+      rivals,
+    ].join("\n");
+  });
+
+  return [
+    "PAINFINDER — 오늘의 후보 내보내기",
+    `생성 시각: ${createdAt}`,
+    `후보 수: ${items.length}건`,
+    "용도: 후보 추출·요약·경쟁 검증·점수 프롬프트를 개선하기 위한 Claude 검토용 자료",
+    "",
+    "검토 요청: 잘못 통과한 후보, 요약 왜곡, 경쟁자 오분류, 점수 근거가 약한 항목을 찾아 개선 의견을 제안해 주세요.",
+    "",
+    ...sections,
+  ].join("\n\n");
+}
+
+function downloadCandidatesText(items: Candidate[]) {
+  const blob = new Blob([`\uFEFF${buildCandidatesText(items)}`], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  const date = new Date().toLocaleDateString("sv-SE");
+  anchor.href = url;
+  anchor.download = `painfinder-today-${date}.txt`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 function ScoreGauge({ score }: { score: number }) {
   return <span className={`score score-${score >= 9 ? "high" : score >= 7 ? "mid" : "low"}`}><strong>{score}</strong><small>/12</small></span>;
 }
@@ -191,7 +259,7 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
       <div className="filter-row">
         <label className="searchbox"><span>⌕</span><input value={search} onChange={e => setSearch(e.target.value)} placeholder="후보 검색" /></label>
         <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)} aria-label="소스 필터"><option>전체 소스</option><option>네이버 카페</option><option>지식iN</option><option>네이버 블로그</option><option>앱 리뷰</option><option>Threads</option></select>
-        <button className="filter-button">점수 높은 순 ↕</button>
+        <button className="export-button" onClick={() => downloadCandidatesText(allItems)} disabled={!allItems.length} title="클로드 공유용 TXT 파일로 저장">전체 TXT ↓</button>
       </div>
       <div className="list-head"><span>후보 {visible.length}건</span><small>최근 실행 · {lastRun ? new Date(lastRun.startedAt).toLocaleString("ko-KR") : "없음"}</small></div>
       <div className="candidate-list">
