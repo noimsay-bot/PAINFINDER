@@ -252,7 +252,11 @@ export async function supabaseRest(path: string, init: RequestInit = {}) {
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!base || !key) return null;
-  const response = await fetch(`${base}/rest/v1/${path}`, { ...init, headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...(init.headers ?? {}) } });
+  const authHeaders: Record<string, string> = { apikey: key };
+  // Supabase's new sb_secret_* keys authenticate through `apikey`; only the
+  // legacy JWT service-role keys belong in the Authorization header.
+  if (key.startsWith("eyJ")) authHeaders.Authorization = `Bearer ${key}`;
+  const response = await fetch(`${base}/rest/v1/${path}`, { ...init, headers: { ...authHeaders, "User-Agent": "PainfinderServer/1.0", "Content-Type": "application/json", ...(init.headers ?? {}) } });
   if (!response.ok) throw new Error(`Supabase ${response.status}: ${await response.text()}`);
   const text = await response.text();
   return text ? JSON.parse(text) : null;
