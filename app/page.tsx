@@ -383,7 +383,33 @@ function SettingsView() {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [saved, setSaved] = useState(false);
-  const startRun = () => { setRunning(true); setProgress(8); const timer = window.setInterval(() => setProgress(p => { if (p >= 100) { window.clearInterval(timer); setRunning(false); return 100; } return Math.min(100, p + 12); }), 240); };
+  const [runMessage, setRunMessage] = useState("");
+  const configBody = () => ({
+    name: preset,
+    mode_ratio: mode,
+    families: Object.fromEntries(families.map(f => [f.name, f.active ? f.weight : 0])),
+    domains,
+    sources: Object.fromEntries(sources.map(source => [source, true])),
+    period_days: 7,
+    limits: { queries: 20, itemsPerSource: 500, dailyCostUsd: 3 },
+  });
+  const startRun = async () => {
+    setRunning(true); setProgress(8); setRunMessage("파이프라인을 시작하는 중");
+    const timer = window.setInterval(() => setProgress(p => Math.min(86, p + 5)), 450);
+    try {
+      const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(configBody()) });
+      const result = await response.json() as { mode?: string; error?: string; stageCounts?: { collected?: number; llm2Analyzed?: number } };
+      if (!response.ok) throw new Error(result.error ?? "실행 실패");
+      setProgress(100);
+      setRunMessage(result.mode === "demo" ? "데모 실행 완료 · API 키 연결 시 실수집 시작" : `실행 완료 · ${result.stageCounts?.collected ?? 0}건 수집 / ${result.stageCounts?.llm2Analyzed ?? 0}건 분석`);
+    } catch (error) { setRunMessage(error instanceof Error ? error.message : "실행 실패"); }
+    finally { window.clearInterval(timer); setRunning(false); }
+  };
+  const saveConfig = async () => {
+    setSaved(false);
+    try { await fetch("/api/configs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(configBody()) }); setSaved(true); }
+    finally { window.setTimeout(() => setSaved(false), 1500); }
+  };
   const toggleSource = (source: string) => setSources(s => s.includes(source) ? s.filter(x => x !== source) : [...s, source]);
   return <div className="settings-wrap">
     <div className="preset-bar"><div><label>실행 프리셋</label><select value={preset} onChange={e => setPreset(e.target.value)}><option>자영업 탐색</option><option>개발자 도구</option><option>전체 훑기</option></select></div><button>＋ 새 프리셋</button><span>마지막 저장 · 오늘 16:42</span></div>
@@ -394,7 +420,7 @@ function SettingsView() {
       <section className="setting-card search-card"><header><span>04</span><div><h2>검색 영역</h2><p>관심 업종과 데이터 소스를 제한합니다.</p></div></header><label className="field-label">도메인 / 업종</label><div className="tag-input">{domains.map(d => <span key={d}>{d}<button onClick={() => setDomains(domains.filter(x => x !== d))}>×</button></span>)}<input value={domainInput} onChange={e => setDomainInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && domainInput.trim()) { setDomains([...domains, domainInput.trim()]); setDomainInput(""); } }} placeholder="입력 후 Enter" /></div><label className="field-label">소스</label><div className="source-options">{["네이버카페", "지식iN", "블로그", "웹문서", "Threads", "앱리뷰", "HN"].map(s => <button key={s} className={sources.includes(s) ? "on" : ""} onClick={() => toggleSource(s)}><i />{s}{s === "Threads" && <em>승인 필요</em>}</button>)}</div><div className="mini-fields"><label>기간<select defaultValue="7"><option value="7">최근 7일</option><option value="30">최근 30일</option><option value="90">최근 90일</option></select></label><label>앱 목록<button>4개 앱 관리 →</button></label></div></section>
       <section className="setting-card limit-card"><header><span>05</span><div><h2>하드 상한</h2><p>예상 밖의 폭주를 코드와 설정에서 이중 차단합니다.</p></div></header><div className="limit-grid"><label>1회 쿼리 수<div><input type="number" defaultValue="20" /><span>최대 50</span></div></label><label>소스별 수집 상한<div><input type="number" defaultValue="500" /><span>건</span></div></label><label>일일 비용 상한<div><b>$</b><input type="number" defaultValue="3" /><span>최대 $10</span></div></label></div><p className="limit-note"><span>!</span> 상한 도달 시 실행을 즉시 중단하고 로그에 이유를 남깁니다.</p></section>
     </div>
-    <div className="settings-footer"><div>{progress > 0 && <><span>{running ? "파이프라인 실행 중" : "실행 완료 · 후보 12건 생성"}</span><div className="run-progress"><i style={{ width: `${progress}%` }} /></div></>}</div><button className="secondary" onClick={() => { setSaved(true); setTimeout(() => setSaved(false), 1500); }}>{saved ? "✓ 저장됨" : "설정 저장"}</button><button className="primary" onClick={startRun} disabled={running}>{running ? `${progress}% 처리 중` : "▶ 지금 실행"}</button></div>
+    <div className="settings-footer"><div>{progress > 0 && <><span>{running ? `파이프라인 실행 중 · ${progress}%` : runMessage}</span><div className="run-progress"><i style={{ width: `${progress}%` }} /></div></>}</div><button className="secondary" onClick={saveConfig}>{saved ? "✓ 저장됨" : "설정 저장"}</button><button className="primary" onClick={startRun} disabled={running}>{running ? `${progress}% 처리 중` : "▶ 지금 실행"}</button></div>
   </div>;
 }
 
