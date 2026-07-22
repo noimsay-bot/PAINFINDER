@@ -368,15 +368,15 @@ function SignalsView({ onOpen }: { onOpen: (id: number) => void }) {
   return <div className="page-pad"><div className="signal-toolbar"><div className="insight"><span>↻</span><div><strong>반복은 의견보다 강합니다.</strong><p>다른 사람이, 다른 날, 다른 곳에서 같은 문제를 말하면 제품 후보로 올라옵니다.</p></div></div><button>카운트 높은 순 ↕</button></div><div className="cluster-list">{clusters.map((c, idx) => <button key={c.title} className="cluster" onClick={() => onOpen(c.id)}><div className="cluster-rank">0{idx + 1}</div><div className="cluster-copy"><div><span className="cluster-count">{c.count}회 반복</span><span>{c.span} 동안</span></div><h2>{c.title}</h2><p>{c.note}</p><div className="cluster-sources">{c.sources.map(s => <i key={s}>{s}</i>)}</div></div><div className="spark" aria-label="최근 발생 추이">{c.trend.map((v, i) => <i key={i} style={{ height: `${10 + v * 6}px` }} />)}</div><span className="cluster-arrow">→</span></button>)}</div></div>;
 }
 
-const INITIAL_FAMILIES = [
+const INITIAL_FAMILIES: Array<{ name: string; weight: number; active: boolean }> = [
   ["workaround", 30, true], ["question", 30, true], ["seeking", 20, true],
   ["emotion", 0, false], ["giveup", 10, true], ["request", 10, true],
-] as const;
+].map(([name, weight, active]) => ({ name: String(name), weight: Number(weight), active: Boolean(active) }));
 
 function SettingsView() {
   const [preset, setPreset] = useState("자영업 탐색");
   const [mode, setMode] = useState(70);
-  const [families, setFamilies] = useState(INITIAL_FAMILIES.map(([name, weight, active]) => ({ name, weight, active })));
+  const [families, setFamilies] = useState(INITIAL_FAMILIES);
   const [sources, setSources] = useState(["네이버카페", "지식iN", "블로그", "앱리뷰"]);
   const [domains, setDomains] = useState(["자영업", "식품 제조", "교육", "이커머스"]);
   const [domainInput, setDomainInput] = useState("");

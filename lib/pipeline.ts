@@ -17,6 +17,22 @@ export type RunConfig = {
   limits?: { queries?: number; itemsPerSource?: number; dailyCostUsd?: number };
 };
 
+type NormalizedRunConfig = {
+  id?: string;
+  name: string;
+  model_stage1: string;
+  model_stage2: string;
+  model_verify: string;
+  mode_ratio: number;
+  families: Record<string, number>;
+  domains: string[];
+  excluded_domains: string[];
+  sources: Record<string, boolean>;
+  period_days: number;
+  app_list: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
+  limits: { queries: number; itemsPerSource: number; dailyCostUsd: number };
+};
+
 type RawSignal = {
   source: string;
   source_id: string;
@@ -51,7 +67,7 @@ const SOURCE_MAP: Record<string, NaverSearchType> = {
   "네이버카페": "cafearticle", "지식iN": "kin", "블로그": "blog", "웹문서": "webkr",
 };
 
-export function normalizeConfig(input: RunConfig): Required<Omit<RunConfig, "id">> & { id?: string } {
+export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
   const queries = Math.min(Math.max(input.limits?.queries ?? DEFAULT_LIMITS.QUERIES_PER_RUN, 1), HARD_LIMITS.QUERIES_PER_RUN);
   const itemsPerSource = Math.min(Math.max(input.limits?.itemsPerSource ?? DEFAULT_LIMITS.ITEMS_PER_SOURCE.naver, 1), HARD_LIMITS.ITEMS_PER_SOURCE);
   const dailyCostUsd = Math.min(Math.max(input.limits?.dailyCostUsd ?? DEFAULT_LIMITS.DAILY_COST_CEILING_USD, .1), HARD_LIMITS.DAILY_COST_CEILING_USD);

@@ -21,7 +21,7 @@ export async function searchNaver(params: {
   sort?: "date" | "sim";
   clientId: string;
   clientSecret: string;
-}) {
+}): Promise<Array<Record<string, unknown> & { title: string; description: string }>> {
   const { type, query, clientId, clientSecret } = params;
   const url = new URL(`https://openapi.naver.com/v1/search/${type}.json`);
   url.searchParams.set("query", query);
