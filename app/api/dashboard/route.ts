@@ -84,7 +84,7 @@ export async function GET() {
       startedAt: String(row.started_at ?? ""),
       endedAt: row.ended_at ? String(row.ended_at) : null,
       preset: String(one(row.run_configs).name ?? "기본 실행"),
-      status: row.ended_at ? (row.stopped_reason ? "stopped" : "completed") : "running",
+      status: row.ended_at ? (row.stopped_reason || (Array.isArray(row.errors) && row.errors.length > 0) ? "stopped" : "completed") : "running",
       stageCounts: (row.stage_counts as Row | null) ?? {},
       llmCalls: (row.llm_calls as Row | null) ?? {},
       cost: Number(row.cost_estimate ?? 0),

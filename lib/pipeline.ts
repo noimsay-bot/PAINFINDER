@@ -205,10 +205,19 @@ async function anthropicJson(model: string, prompt: string, maxTokens = 1800) {
   for (let attempt = 0; attempt <= DEFAULT_LIMITS.LLM_MAX_RETRIES; attempt++) {
     try {
       const response = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" }, body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0, messages: [{ role: "user", content: prompt }] }) });
-      if (!response.ok) throw new Error(`Anthropic ${response.status}`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+        const detail = payload?.error?.message ?? "요청이 거부되었습니다.";
+        const failure = new Error(`Anthropic ${response.status}: ${detail}`);
+        if (response.status < 500 && response.status !== 429) throw Object.assign(failure, { nonRetryable: true });
+        throw failure;
+      }
       const data = await response.json() as { content?: Array<{ type: string; text?: string }> };
       return extractJson(data.content?.find(c => c.type === "text")?.text ?? "");
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      lastError = error;
+      if (error instanceof Error && "nonRetryable" in error) throw error;
+    }
   }
   throw lastError;
 }
@@ -233,7 +242,12 @@ export async function runPipeline(input: RunConfig) {
       try {
         const result = await anthropicJson(config.model_stage1, `다음 게시물에서 반복 불편, 질문형 수요, 도구 탐색 실패, 임시방편, 포기, 지불 의사 중 하나라도 있으면 넓게 통과시켜라. JSON 배열만 반환: [{"id":"...","pass":true,"type":"1~6","reason":"한 줄"}].\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`) as Stage1[];
         stage1.push(...result); llm1Calls++;
-      } catch (error) { errors.push(`llm1:${error instanceof Error ? error.message : "failed"}`); for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, type: "llm1_failed", reason: "판정 실패" }); }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "failed";
+        errors.push(`llm1:${message}`);
+        for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, type: "llm1_failed", reason: "판정 실패" });
+        if (/Anthropic 4\d\d/.test(message)) break;
+      }
     }
   }
   const passedIndexes = stage1.filter(x => x.pass).map(x => Number(x.id)).filter(Number.isFinite);
