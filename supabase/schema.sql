@@ -13,6 +13,7 @@ create table if not exists run_configs (
   excluded_domains jsonb not null default '["연예","정치","스포츠"]'::jsonb,
   sources jsonb not null default '{}'::jsonb,
   period_days integer not null default 7,
+  auto_verify_top_n integer not null default 10 check (auto_verify_top_n between 0 and 40),
   app_list jsonb not null default '[]'::jsonb,
   limits jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
@@ -50,6 +51,7 @@ create table if not exists raw_items (
   posted_at timestamptz,
   collected_at timestamptz not null default now(),
   status text not null default 'collected',
+  reject_reason text,
   run_id uuid references run_logs(id) on delete set null,
   unique(source, source_id)
 );
@@ -67,6 +69,7 @@ create table if not exists pain_points (
   embedding vector(1024),
   cluster_id uuid,
   recurrence_count integer not null default 1,
+  precision_verified_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -77,18 +80,20 @@ create table if not exists competitors (
   url text not null,
   pricing text,
   quality_note text,
-  last_updated_signal text
+  last_updated_signal text,
+  seller_name text,
+  source text not null default 'web'
 );
 
 create table if not exists scores (
   pain_point_id uuid primary key references pain_points(id) on delete cascade,
   f1 smallint not null check (f1 between 0 and 2),
-  f2 smallint not null check (f2 between 0 and 2),
-  f3 smallint not null check (f3 between 0 and 2),
-  f4 smallint not null check (f4 between 0 and 2),
-  f5 smallint not null check (f5 between 0 and 2),
+  f2 smallint check (f2 between 0 and 2),
+  f3 smallint check (f3 between 0 and 2),
+  f4 smallint not null check (f4 between 0 and 3),
+  f5 smallint not null check (f5 between 0 and 3),
   f6 smallint not null check (f6 between 0 and 2),
-  total smallint generated always as (f1 + f2 + f3 + f4 + f5 + f6) stored,
+  total smallint generated always as (f1 + coalesce(f2, 0) + coalesce(f3, 0) + f4 + f5 + f6) stored,
   data_access_stable boolean not null default false,
   verdict text
 );

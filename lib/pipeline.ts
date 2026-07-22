@@ -1,8 +1,9 @@
 import { DEFAULT_LIMITS, HARD_LIMITS } from "./limits";
-import { scoreMarket, verifyMarket, type MarketVerdict, type ProductCompetitor, type VerificationCounts } from "./competitors";
+import { classifyMarket, mergeProducts, searchAppMarket, verifyMarket, type MarketVerdict, type ProductCompetitor, type VerificationCounts } from "./competitors";
 import { getLlmProvider, LlmProviderError, resolveLlmModel, type LlmResult } from "./llm";
 import { calculateLlmCost } from "./llm/pricing";
 import { normalizeNaverText, searchNaver, type NaverSearchType } from "./naver";
+import { calculateFourScores, type BuyerContext, type FourScores } from "./scoring";
 
 export type RunConfig = {
   id?: string;
@@ -17,6 +18,7 @@ export type RunConfig = {
   excluded_domains?: string[];
   sources?: Record<string, boolean>;
   period_days?: number;
+  auto_verify_top_n?: number;
   app_list?: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
   limits?: { queries?: number; itemsPerSource?: number; dailyCostUsd?: number };
 };
@@ -33,6 +35,7 @@ type NormalizedRunConfig = {
   excluded_domains: string[];
   sources: Record<string, boolean>;
   period_days: number;
+  auto_verify_top_n: number;
   app_list: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
   limits: { queries: number; itemsPerSource: number; dailyCostUsd: number };
 };
@@ -46,7 +49,8 @@ type RawSignal = {
   posted_at: string | null;
 };
 
-type Stage1 = { id: string; pass: boolean; type: string; reason: string };
+export type RejectReason = "구직" | "구매문의" | "가격불만" | "일회성" | "정보질문" | "학습" | "홍보" | "해결됨" | "기타";
+type Stage1 = { id: string; pass: boolean; type?: string; reason?: string; reject_reason?: RejectReason };
 type Analysis = {
   pain_summary: string;
   who: string;
@@ -55,6 +59,9 @@ type Analysis = {
   money_signal: string | null;
   search_terms_for_verification: string[];
   domain: string;
+  ai_replacement_score: number;
+  buyer_context: BuyerContext;
+  maintenance_score: number;
 };
 
 const SOURCE_MAP: Record<string, NaverSearchType> = {
@@ -78,6 +85,7 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
     excluded_domains: input.excluded_domains ?? ["연예", "정치", "스포츠"],
     sources: input.sources ?? { naverCafe: true, naverKin: true, naverBlog: true, appstore: true },
     period_days: Math.min(Math.max(input.period_days ?? 7, 1), 365),
+    auto_verify_top_n: Math.min(Math.max(input.auto_verify_top_n ?? 10, 0), DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN),
     app_list: input.app_list ?? [],
     limits: { queries, itemsPerSource, dailyCostUsd },
   };
@@ -173,7 +181,7 @@ async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, err
 }
 
 function fallbackAnalysis(item: RawSignal): Analysis {
-  return { pain_summary: item.title || item.body.slice(0, 90), who: "확인 필요", current_workaround: null, frequency: "occasional", money_signal: null, search_terms_for_verification: [item.title], domain: "미분류" };
+  return { pain_summary: item.title || item.body.slice(0, 90), who: "확인 필요", current_workaround: null, frequency: "occasional", money_signal: null, search_terms_for_verification: [], domain: "미분류", ai_replacement_score: 0, buyer_context: "hobby_or_oneoff", maintenance_score: 1 };
 }
 
 function normalizeAnalysis(value: Partial<Analysis>, item: RawSignal): Analysis {
@@ -185,14 +193,19 @@ function normalizeAnalysis(value: Partial<Analysis>, item: RawSignal): Analysis 
   const searchTerms = Array.isArray(value.search_terms_for_verification)
     ? value.search_terms_for_verification.map(String).map(term => term.trim()).filter(Boolean).slice(0, 3)
     : fallback.search_terms_for_verification;
+  const buyerContexts = new Set<BuyerContext>(["business", "individual_repeated", "hobby_or_oneoff"]);
+  const clamp = (input: unknown, max: number) => Math.min(max, Math.max(0, Math.round(Number(input) || 0)));
   return {
     pain_summary: String(value.pain_summary ?? fallback.pain_summary),
     who: String(value.who ?? fallback.who),
     current_workaround: value.current_workaround ? String(value.current_workaround) : null,
     frequency,
     money_signal: value.money_signal ? String(value.money_signal) : null,
-    search_terms_for_verification: searchTerms.length ? searchTerms : fallback.search_terms_for_verification,
+    search_terms_for_verification: searchTerms,
     domain: String(value.domain ?? fallback.domain),
+    ai_replacement_score: clamp(value.ai_replacement_score, 2),
+    buyer_context: buyerContexts.has(value.buyer_context as BuyerContext) ? value.buyer_context as BuyerContext : fallback.buyer_context,
+    maintenance_score: clamp(value.maintenance_score, 2),
   };
 }
 
@@ -237,6 +250,7 @@ export async function runPipeline(input: RunConfig) {
     }
     return false;
   };
+  const rejectReasons = new Set<RejectReason>(["구직", "구매문의", "가격불만", "일회성", "정보질문", "학습", "홍보", "해결됨", "기타"]);
   const stage1: Stage1[] = [];
   let llm1Calls = 0;
   for (let offset = 0; offset < filtered.length && llm1Calls < DEFAULT_LIMITS.LLM1_MAX_CALLS_PER_RUN && !stoppedReason; offset += 20) {
@@ -245,24 +259,41 @@ export async function runPipeline(input: RunConfig) {
       const completion = await llm.complete({
         model: stage1Model,
         jsonMode: true,
-        maxOutputTokens: 1800,
-        system: "너는 게시물에서 실제 페인포인트 신호를 판정하는 분석기다. 반드시 유효한 JSON 객체로만 응답하라.",
-        user: `다음 게시물에서 반복 불편, 질문형 수요, 도구 탐색 실패, 임시방편, 포기, 지불 의사 중 하나라도 있으면 넓게 통과시켜라. 반드시 {"results":[{"id":"...","pass":true,"type":"1~6","reason":"한 줄"}]} 형태의 JSON 객체로 응답하라.\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`,
+        maxOutputTokens: 2200,
+        system: "너는 반복적인 프로세스·도구 문제만 통과시키는 엄격한 페인포인트 판정기다. 반드시 유효한 JSON 객체로만 응답하라.",
+        user: `다음 게시물을 엄격히 판정하라. 통과하려면 (1) 일회성이 아닌 반복 업무·생활 불편, (2) 글쓴이 본인 또는 소속 조직이 직접 겪는 문제, (3) 사람·가격·운·시장 상황이 아니라 프로세스나 도구의 문제를 모두 만족해야 한다. 하나라도 불명확하면 탈락시켜라. 즉시 제외: 구직·채용·이직·자기소개서·이력서·면접, 단순 구매/배송/재고/소량 문의, 가격·수수료 불만, 고장·사고·분쟁·환불 같은 일회성 사건, 단순 정보 질문, 학습·강의·자격증, 홍보·판매·모집, 이미 답변으로 해결된 질문. 통과는 {"id":"...","pass":true,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"reject_reason":"구직|구매문의|가격불만|일회성|정보질문|학습|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`,
       });
       llm1Calls++;
       recordUsage(completion);
       const parsed = JSON.parse(completion.text) as { results?: Stage1[] };
       if (!Array.isArray(parsed.results)) throw new Error("LLM 1차 응답에 results 배열이 없습니다.");
-      stage1.push(...parsed.results);
+      const resultById = new Map(parsed.results.map(result => [String(result.id), result]));
+      for (let i = 0; i < batch.length; i++) {
+        const id = String(offset + i);
+        const result = resultById.get(id);
+        const pass = result?.pass === true;
+        stage1.push({
+          id,
+          pass,
+          type: pass ? String(result?.type ?? "기타") : undefined,
+          reason: pass ? String(result?.reason ?? "반복 프로세스 문제") : undefined,
+          reject_reason: pass ? undefined : rejectReasons.has(result?.reject_reason as RejectReason) ? result?.reject_reason : "기타",
+        });
+      }
     } catch (error) {
-      for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, type: "llm1_failed", reason: "판정 실패" });
+      for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, reject_reason: "기타" });
       if (noteLlmError("llm1", error)) break;
     }
   }
-  const passedIndexes = stage1.filter(x => x.pass).map(x => Number(x.id)).filter(Number.isFinite);
-  const passed = passedIndexes.map(i => filtered[i]).filter(Boolean).slice(0, DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN);
-  const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: ProductCompetitor[]; marketVerdict: MarketVerdict; scores: number[] }> = [];
-  let llm2Calls = 0; let verifyCalls = 0; let verifiedItems = 0;
+  const stage1PassCount = stage1.filter(result => result.pass).length;
+  const llm1PassRate = stage1.length ? Number((stage1PassCount / stage1.length).toFixed(4)) : 0;
+  if (llm1PassRate > 0.25) errors.push(`warning:llm1:pass-rate-high:${(llm1PassRate * 100).toFixed(1)}%`);
+  const rejectReasonCounts = Object.fromEntries([...rejectReasons].map(reason => [reason, stage1.filter(result => !result.pass && result.reject_reason === reason).length]));
+  const passedIndexes = stage1.filter(result => result.pass).map(result => Number(result.id)).filter(Number.isFinite);
+  const passed = passedIndexes.map(index => filtered[index]).filter(Boolean).slice(0, DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN);
+  const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: ProductCompetitor[]; marketVerdict: MarketVerdict; scores: FourScores; precisionVerified: boolean }> = [];
+  let llm2Calls = 0;
+  let verifyCalls = 0;
   const verificationCounts: VerificationCounts = { urlExcluded: 0, product: 0, content: 0, irrelevant: 0, appProduct: 0 };
   for (const raw of passed) {
     if (stoppedReason) break;
@@ -272,46 +303,70 @@ export async function runPipeline(input: RunConfig) {
       const completion = await llm.complete({
         model: stage2Model,
         jsonMode: true,
-        maxOutputTokens: 1800,
-        system: "너는 게시물의 페인포인트를 구조화하는 분석기다. 반드시 유효한 JSON 객체로만 응답하라.",
-        user: `게시물의 페인포인트를 분석해 {"pain_summary":"누가 무엇 때문에 불편한가","who":"직업/역할","current_workaround":null,"frequency":"daily|weekly|monthly|occasional","money_signal":null,"search_terms_for_verification":["검색어 3개"],"domain":"태그"} 형태의 JSON 객체로 응답하라.\n${JSON.stringify(raw)}`,
+        maxOutputTokens: 2200,
+        system: "너는 게시물의 페인포인트와 4개 사업성 필터를 근거에 맞게 구조화하는 분석기다. 반드시 유효한 JSON 객체로만 응답하라.",
+        user: `게시물을 분석해 다음 JSON 객체로 응답하라. domain은 제품 검색에 쓸 핵심명사로 짧게 쓴다. search_terms_for_verification은 페인포인트 문장을 그대로 쓰지 말고 반드시 핵심명사에 "프로그램", "솔루션", "SaaS", "서비스 요금제", "관리 시스템" 중 하나를 붙인 형식에서만 3개를 만든다. ai_replacement_score는 2=개인 데이터 조회·실시간 데이터·인터랙티브 계산 필요, 1=일부 필요, 0=설명·정의·목록만으로 해결. buyer_context는 business=사업자·법인 업무, individual_repeated=개인의 반복 업무, hobby_or_oneoff=개인 취미·일회성. maintenance_score는 2=규칙이 거의 변하지 않음, 1=연 1~2회 변동, 0=법·제도·정책을 상시 추종해야 함이다. {"pain_summary":"누가 무엇 때문에 불편한가","who":"직업/역할","current_workaround":null,"frequency":"daily|weekly|monthly|occasional","money_signal":null,"domain":"핵심명사","search_terms_for_verification":["핵심명사 프로그램","핵심명사 솔루션","핵심명사 관리 시스템"],"ai_replacement_score":0,"buyer_context":"business|individual_repeated|hobby_or_oneoff","maintenance_score":0} 형태로 응답하라.\n${JSON.stringify(raw)}`,
       });
       llm2Calls++;
       recordUsage(completion);
       analysis = normalizeAnalysis(JSON.parse(completion.text) as Partial<Analysis>, raw);
     } catch (error) { stopAfterItem = noteLlmError("llm2", error); }
-    let competitors: ProductCompetitor[] = [];
-    let marketVerdict: MarketVerdict = "empty";
-    if (verifiedItems < DEFAULT_LIMITS.VERIFY_MAX_PER_RUN && !stoppedReason) {
-      verifiedItems++;
-      try {
-        const verification = await verifyMarket({
-          searchTerms: analysis.search_terms_for_verification,
-          llm,
-          model: verifyModel,
-          naverClientId: process.env.NAVER_CLIENT_ID,
-          naverClientSecret: process.env.NAVER_CLIENT_SECRET,
-        });
-        competitors = verification.products;
-        marketVerdict = verification.verdict;
-        for (const key of Object.keys(verificationCounts) as Array<keyof VerificationCounts>) verificationCounts[key] += verification.counts[key];
-        errors.push(...verification.errors);
-        if (verification.usage) {
-          verifyCalls++;
-          recordUsage(verification.usage);
-        }
-      } catch (error) { stopAfterItem = noteLlmError("verify", error); }
-    }
-    const paidSignal = marketVerdict === "paid_exists" || marketVerdict === "crowded" ? 1 : 0;
-    const scores = [analysis.current_workaround ? 2 : 1, 1, 2, scoreMarket(marketVerdict), Math.max(analysis.money_signal ? 2 : 0, paidSignal), 1];
-    analyses.push({ raw, analysis, competitors, marketVerdict, scores });
+    const marketVerdict: MarketVerdict = "empty";
+    analyses.push({
+      raw,
+      analysis,
+      competitors: [],
+      marketVerdict,
+      scores: calculateFourScores({ aiReplacementScore: analysis.ai_replacement_score, maintenanceScore: analysis.maintenance_score, moneySignal: analysis.money_signal, verdict: marketVerdict, buyerContext: analysis.buyer_context }),
+      precisionVerified: false,
+    });
     if (stopAfterItem) break;
   }
+
+  let appIndex = 0;
+  const appWorker = async () => {
+    while (appIndex < analyses.length) {
+      const candidate = analyses[appIndex++];
+      const appVerification = await searchAppMarket(candidate.analysis.domain);
+      candidate.competitors = appVerification.products;
+      candidate.marketVerdict = appVerification.verdict;
+      candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: candidate.marketVerdict, buyerContext: candidate.analysis.buyer_context });
+      verificationCounts.appProduct += appVerification.counts.appProduct;
+      errors.push(...appVerification.errors);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(2, analyses.length) }, () => appWorker()));
+
+  const autoTargets = [...analyses].sort((a, b) => b.scores.total - a.scores.total).slice(0, config.auto_verify_top_n);
+  let verifiedItems = 0;
+  let verifyIndex = 0;
+  const verifyWorker = async () => {
+    while (verifyIndex < autoTargets.length && !stoppedReason) {
+      const candidate = autoTargets[verifyIndex++];
+      try {
+        const verification = await verifyMarket({ searchTerms: candidate.analysis.search_terms_for_verification, llm, model: verifyModel, naverClientId: process.env.NAVER_CLIENT_ID, naverClientSecret: process.env.NAVER_CLIENT_SECRET });
+        candidate.competitors = mergeProducts(candidate.competitors, verification.products);
+        candidate.marketVerdict = classifyMarket(candidate.competitors);
+        candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: candidate.marketVerdict, buyerContext: candidate.analysis.buyer_context });
+        candidate.precisionVerified = true;
+        verifiedItems++;
+        for (const key of Object.keys(verificationCounts) as Array<keyof VerificationCounts>) verificationCounts[key] += verification.counts[key];
+        errors.push(...verification.errors);
+        if (verification.usage) { verifyCalls++; recordUsage(verification.usage); }
+      } catch (error) { noteLlmError("verify", error); }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, autoTargets.length) }, () => verifyWorker()));
+
   const stageCounts = {
     collected: deduped.length,
     rulePassed: filtered.length,
-    llm1Passed: passed.length,
+    llm1Evaluated: stage1.length,
+    llm1Passed: stage1PassCount,
+    llm1_pass_rate: llm1PassRate,
+    reject_reason_counts: rejectReasonCounts,
     llm2Analyzed: analyses.length,
+    appVerified: analyses.length,
     verified: verifiedItems,
     competitorUrlExcluded: verificationCounts.urlExcluded,
     competitorProduct: verificationCounts.product + verificationCounts.appProduct,
@@ -320,7 +375,11 @@ export async function runPipeline(input: RunConfig) {
     competitorAppProduct: verificationCounts.appProduct,
   };
   const costEstimate = Number(runningCost.toFixed(4));
-  return { mode: "live", config, startedAt, endedAt: new Date().toISOString(), queries, stageCounts, llmCalls: { stage1: llm1Calls, stage2: llm2Calls, verify: verifyCalls, inputTokens, outputTokens }, costEstimate, stoppedReason, errors, candidates: analyses };
+  const stage1Evaluations = stage1.flatMap(result => {
+    const raw = filtered[Number(result.id)];
+    return raw ? [{ raw, result }] : [];
+  });
+  return { mode: "live", config, startedAt, endedAt: new Date().toISOString(), queries, stageCounts, llmCalls: { stage1: llm1Calls, stage2: llm2Calls, verify: verifyCalls, inputTokens, outputTokens }, costEstimate, stoppedReason, errors, candidates: analyses, stage1Evaluations };
 }
 
 export async function supabaseRest(path: string, init: RequestInit = {}) {
@@ -340,14 +399,31 @@ export async function supabaseRest(path: string, init: RequestInit = {}) {
 export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>) {
   const created = await supabaseRest("run_logs", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ config_id: result.config.id ?? null, started_at: result.startedAt, ended_at: result.endedAt, stage_counts: result.stageCounts, llm_calls: result.llmCalls, cost_estimate: result.costEstimate, stopped_reason: result.stoppedReason, errors: result.errors }) }) as Array<{ id: string }> | null;
   const runId = created?.[0]?.id;
-  if (!runId || !result.candidates.length) return runId ?? null;
+  if (!runId) return null;
+  for (let offset = 0; offset < result.stage1Evaluations.length; offset += 100) {
+    const rows = result.stage1Evaluations.slice(offset, offset + 100).map(({ raw, result: decision }) => ({
+      ...raw,
+      run_id: runId,
+      status: decision.pass ? "llm1_passed" : "rejected",
+      reject_reason: decision.pass ? null : decision.reject_reason ?? "기타",
+    }));
+    if (rows.length) await supabaseRest("raw_items?on_conflict=source,source_id", { method: "POST", headers: { Prefer: "resolution=ignore-duplicates" }, body: JSON.stringify(rows) });
+  }
   for (const candidate of result.candidates) {
-    const rawRows = await supabaseRest("raw_items?on_conflict=source,source_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ ...candidate.raw, run_id: runId, status: "analyzed" }) }) as Array<{ id: string }>;
-    const rawId = rawRows?.[0]?.id; if (!rawId) continue;
-    const painRows = await supabaseRest("pain_points?on_conflict=raw_item_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ raw_item_id: rawId, pain_summary: candidate.analysis.pain_summary, who: candidate.analysis.who, current_workaround: candidate.analysis.current_workaround, frequency: candidate.analysis.frequency, money_signal: candidate.analysis.money_signal, domain: candidate.analysis.domain, signal_type: "llm_pass" }) }) as Array<{ id: string }>;
+    const insertedRawRows = await supabaseRest("raw_items?on_conflict=source,source_id", { method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" }, body: JSON.stringify({ ...candidate.raw, run_id: runId, status: "analyzed", reject_reason: null }) }) as Array<{ id: string }>;
+    let rawId: string | undefined = insertedRawRows?.[0]?.id;
+    if (!rawId) {
+      const existingRawRows = await supabaseRest(`raw_items?source=eq.${encodeURIComponent(candidate.raw.source)}&source_id=eq.${encodeURIComponent(candidate.raw.source_id)}&select=id&limit=1`) as Array<{ id: string }> | null;
+      rawId = existingRawRows?.[0]?.id;
+    }
+    if (!rawId) continue;
+    const existingPain = await supabaseRest(`pain_points?raw_item_id=eq.${encodeURIComponent(rawId)}&select=id&limit=1`) as Array<{ id: string }> | null;
+    if (existingPain?.length) continue;
+    const painBody: Record<string, unknown> = { raw_item_id: rawId, pain_summary: candidate.analysis.pain_summary, who: candidate.analysis.who, current_workaround: candidate.analysis.current_workaround, frequency: candidate.analysis.frequency, money_signal: candidate.analysis.money_signal, domain: candidate.analysis.domain, signal_type: "llm_pass" };
+    if (candidate.precisionVerified) painBody.precision_verified_at = new Date().toISOString();
+    const painRows = await supabaseRest("pain_points", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(painBody) }) as Array<{ id: string }>;
     const painId = painRows?.[0]?.id; if (!painId) continue;
-    await supabaseRest("scores?on_conflict=pain_point_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify({ pain_point_id: painId, f1: candidate.scores[0], f2: candidate.scores[1], f3: candidate.scores[2], f4: candidate.scores[3], f5: candidate.scores[4], f6: candidate.scores[5], data_access_stable: true, verdict: candidate.marketVerdict }) });
-    await supabaseRest(`competitors?pain_point_id=eq.${encodeURIComponent(painId)}`, { method: "DELETE" });
+    await supabaseRest("scores", { method: "POST", body: JSON.stringify({ pain_point_id: painId, f1: candidate.scores.f1, f2: null, f3: null, f4: candidate.scores.f4, f5: candidate.scores.f5, f6: candidate.scores.f6, data_access_stable: true, verdict: candidate.marketVerdict }) });
     if (candidate.competitors.length) await supabaseRest("competitors", { method: "POST", body: JSON.stringify(candidate.competitors.map(c => ({ ...c, pain_point_id: painId }))) });
   }
   return runId;

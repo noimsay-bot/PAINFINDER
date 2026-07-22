@@ -35,7 +35,7 @@ function marketVerdict(value: unknown): MarketVerdict {
 export async function GET() {
   try {
     const [painRows, logRows] = await Promise.all([
-      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,created_at,raw_items(source,url,title,body,posted_at),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal),decisions(action,reason,decided_at)&order=created_at.desc&limit=200"),
+      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,reject_reason),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,decided_at)&order=created_at.desc&limit=200"),
       supabaseRest("run_logs?select=id,started_at,ended_at,stage_counts,llm_calls,cost_estimate,stopped_reason,errors,run_configs(name)&order=started_at.desc&limit=50"),
     ]) as [Row[] | null, Row[] | null];
 
@@ -52,7 +52,10 @@ export async function GET() {
         pricing: String(rival.pricing ?? "가격 미확인"),
         note: String(rival.quality_note ?? "검토 메모 없음"),
         state: String(rival.pricing ?? "unknown"),
+        seller: rival.seller_name ? String(rival.seller_name) : null,
+        source: String(rival.source ?? "web"),
       }));
+      const legacyScore = (score.f2 !== null && score.f2 !== undefined) || (score.f3 !== null && score.f3 !== undefined);
       return {
         id: String(row.id),
         summary: String(row.pain_summary ?? "요약 없음"),
@@ -61,8 +64,11 @@ export async function GET() {
         sourceTone: sourceTone(source),
         time: relativeTime(raw.posted_at ?? row.created_at),
         score: Number(score.total ?? 0),
+        scoreMax: legacyScore ? 12 : 10,
         competitors: rivals.length,
         marketVerdict: marketVerdict(score.verdict),
+        precisionVerified: Boolean(row.precision_verified_at),
+        precisionVerifiedAt: row.precision_verified_at ? String(row.precision_verified_at) : null,
         decision: String(latest.action ?? "unreviewed"),
         decisionReason: latest.reason ? String(latest.reason) : null,
         decidedAt: latest.decided_at ? String(latest.decided_at) : null,
@@ -75,12 +81,10 @@ export async function GET() {
         recurrence: Number(row.recurrence_count ?? 1),
         access: Boolean(score.data_access_stable),
         scores: [
-          { label: "AI 대체 불가성", value: Number(score.f1 ?? 0) },
-          { label: "기술 진입장벽", value: Number(score.f2 ?? 0) },
-          { label: "포털 비대체성", value: Number(score.f3 ?? 0) },
-          { label: "인컴번트 상태", value: Number(score.f4 ?? 0) },
-          { label: "지불 의향", value: Number(score.f5 ?? 0) },
-          { label: "유지보수 부담", value: Number(score.f6 ?? 0) },
+          { label: "AI 대체 불가성", value: Number(score.f1 ?? 0), max: 2 },
+          { label: "인컴번트 상태", value: Number(score.f4 ?? 0), max: 3 },
+          { label: "지불 의향", value: Number(score.f5 ?? 0), max: 3 },
+          { label: "유지보수 부담", value: Number(score.f6 ?? 0), max: 2 },
         ],
         rivals,
         url: String(raw.url ?? ""),

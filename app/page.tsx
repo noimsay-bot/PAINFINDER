@@ -15,8 +15,11 @@ type Candidate = {
   sourceTone: string;
   time: string;
   score: number;
+  scoreMax: number;
   competitors: number;
   marketVerdict: MarketVerdict;
+  precisionVerified: boolean;
+  precisionVerifiedAt: string | null;
   decision: Decision;
   domain: string;
   frequency: string;
@@ -26,8 +29,8 @@ type Candidate = {
   money: string | null;
   recurrence: number;
   access: boolean;
-  scores: { label: string; value: number }[];
-  rivals: { name: string; url: string; pricing: CompetitorPricing; note: string; state: CompetitorPricing }[];
+  scores: { label: string; value: number; max: number }[];
+  rivals: { name: string; url: string; pricing: CompetitorPricing; note: string; state: CompetitorPricing; seller: string | null; source: string }[];
   url: string;
   decisionReason?: string | null;
   decidedAt?: string | null;
@@ -39,7 +42,7 @@ type RunLog = {
   endedAt: string | null;
   preset: string;
   status: "completed" | "running" | "stopped";
-  stageCounts: Record<string, number>;
+  stageCounts: Record<string, unknown>;
   llmCalls: Record<string, number>;
   cost: number;
   stoppedReason: string | null;
@@ -69,12 +72,14 @@ const PRICING_LABEL: Record<CompetitorPricing, string> = {
 function buildCandidatesText(items: Candidate[]) {
   const createdAt = new Date().toLocaleString("ko-KR");
   const sections = items.map((item, index) => {
-    const scores = item.scores.map(score => `- ${score.label}: ${score.value}/2`).join("\n");
+    const scores = item.scores.map(score => `- ${score.label}: ${score.value}/${score.max}`).join("\n");
     const rivals = item.rivals.length
       ? item.rivals.map((rival, rivalIndex) => [
           `  ${rivalIndex + 1}. ${rival.name}`,
           `     가격: ${PRICING_LABEL[rival.pricing]}`,
           `     설명: ${rival.note}`,
+          `     제공자: ${rival.seller ?? "확인 불가"}`,
+          `     출처: ${rival.source === "appstore" ? "App Store" : "웹 정밀 검증"}`,
           `     URL: ${rival.url}`,
         ].join("\n")).join("\n")
       : "  확인된 제품 경쟁자 없음";
@@ -91,7 +96,8 @@ function buildCandidatesText(items: Candidate[]) {
       `반복 횟수: ${item.recurrence}회`,
       `현재 판정: ${STATUS_LABEL[item.decision]}`,
       `시장 판정: ${MARKET_LABEL[item.marketVerdict]} (${item.competitors}개)`,
-      `총점: ${item.score}/12`,
+      `총점: ${item.score}/${item.scoreMax}`,
+      `정밀 검증: ${item.precisionVerified ? "완료" : "미실행"}`,
       "",
       "[원문 신호]",
       item.excerpt,
@@ -101,7 +107,7 @@ function buildCandidatesText(items: Candidate[]) {
       `현재 우회 수단: ${item.workaround}`,
       `지불 신호: ${item.money ?? "명시적 신호 없음"}`,
       "",
-      "[6개 필터 점수]",
+      "[4개 필터 점수]",
       scores,
       "",
       "[확인된 제품 경쟁자]",
@@ -134,8 +140,8 @@ function downloadCandidatesText(items: Candidate[]) {
   URL.revokeObjectURL(url);
 }
 
-function ScoreGauge({ score }: { score: number }) {
-  return <span className={`score score-${score >= 9 ? "high" : score >= 7 ? "mid" : "low"}`}><strong>{score}</strong><small>/12</small></span>;
+function ScoreGauge({ score, max }: { score: number; max: number }) {
+  return <span className={`score score-${score >= max * .8 ? "high" : score >= max * .6 ? "mid" : "low"}`}><strong>{score}</strong><small>/{max}</small></span>;
 }
 
 function Topbar({ title, subtitle, dark, setDark }: { title: string; subtitle: string; dark: boolean; setDark: (v: boolean) => void }) {
@@ -164,6 +170,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [dataError, setDataError] = useState("");
   const [setupRequired, setSetupRequired] = useState(false);
+  const [verifyingId, setVerifyingId] = useState("");
 
   useEffect(() => { document.documentElement.dataset.theme = dark ? "dark" : "light"; }, [dark]);
   const loadDashboard = useCallback(async () => {
@@ -185,6 +192,18 @@ export default function Home() {
   ), [items, search, sourceFilter]);
   const selected = items.find(i => i.id === selectedId) ?? items[0];
 
+  const verifyCandidate = useCallback(async (painPointId: string) => {
+    if (!painPointId || verifyingId) return;
+    setVerifyingId(painPointId);
+    try {
+      const response = await fetch("/api/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ painPointId }) });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "정밀 검증에 실패했습니다.");
+      await loadDashboard();
+    } catch (error) { setDataError(error instanceof Error ? error.message : "정밀 검증에 실패했습니다."); }
+    finally { setVerifyingId(""); }
+  }, [loadDashboard, verifyingId]);
+
   const decide = (decision: Decision) => {
     if (!selectedId) return;
     setItems(prev => prev.map(item => item.id === selectedId ? { ...item, decision } : item));
@@ -201,11 +220,12 @@ export default function Home() {
       if (event.key.toLowerCase() === "t") decide("tracking");
       if (event.key.toLowerCase() === "h") decide("holding");
       if (event.key.toLowerCase() === "x") setRejecting(true);
+      if (event.key.toLowerCase() === "v" && selected?.id) void verifyCandidate(selected.id);
       if (event.key === "Enter" && selected?.url) window.open(selected.url, "_blank", "noopener,noreferrer");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view, visible, selectedId, selected?.url]);
+  }, [view, visible, selectedId, selected?.id, selected?.url, verifyCandidate]);
 
   const titles: Record<View, [string, string]> = {
     today: ["오늘의 후보", "경쟁 검증을 통과한 신호부터 검토하세요."],
@@ -227,12 +247,12 @@ export default function Home() {
           <div className="meter"><i style={{ width: items.length ? "100%" : "0%" }} /></div>
           <button onClick={() => setView("settings")}><span>▶</span> 지금 실행</button>
         </div>
-        <div className="shortcut-legend"><p>KEYBOARD</p><div><kbd>J</kbd><kbd>K</kbd><span>이동</span></div><div><kbd>T</kbd><span>추적</span><kbd>H</kbd><span>보류</span></div><div><kbd>X</kbd><span>기각</span><kbd>↵</kbd><span>원문</span></div></div>
+        <div className="shortcut-legend"><p>KEYBOARD</p><div><kbd>J</kbd><kbd>K</kbd><span>이동</span></div><div><kbd>T</kbd><span>추적</span><kbd>H</kbd><span>보류</span></div><div><kbd>X</kbd><span>기각</span><kbd>V</kbd><span>검증</span></div><div><kbd>↵</kbd><span>원문</span></div></div>
       </aside>
 
       <section className="workspace">
         <Topbar title={titles[view][0]} subtitle={titles[view][1]} dark={dark} setDark={setDark} />
-        {view === "today" && (selected ? <TodayView allItems={items} visible={visible} selected={selected} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} rejecting={rejecting} setRejecting={setRejecting} rejectReason={rejectReason} setRejectReason={setRejectReason} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
+        {view === "today" && (selected ? <TodayView allItems={items} visible={visible} selected={selected} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectReason={rejectReason} setRejectReason={setRejectReason} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
         {view === "signals" && <SignalsView items={items} onOpen={(id) => { setSelectedId(id); setView("today"); }} />}
         {view === "settings" && <SettingsView onRunComplete={loadDashboard} />}
         {view === "archive" && <ArchiveView items={items} onRestore={(id) => { setSelectedId(id); setView("today"); }} />}
@@ -244,8 +264,8 @@ export default function Home() {
   );
 }
 
-function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, onDecision, rejecting, setRejecting, rejectReason, setRejectReason }: {
-  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; onDecision: (d: Decision) => void; rejecting: boolean; setRejecting: (v: boolean) => void; rejectReason: string; setRejectReason: (v: string) => void;
+function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, onDecision, onVerify, verifyingId, rejecting, setRejecting, rejectReason, setRejectReason }: {
+  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; onDecision: (d: Decision) => void; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectReason: string; setRejectReason: (v: string) => void;
 }) {
   const rejected = allItems.filter(item => item.decision === "rejected").length;
   return <div className="today-layout">
@@ -264,7 +284,7 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
       <div className="list-head"><span>후보 {visible.length}건</span><small>최근 실행 · {lastRun ? new Date(lastRun.startedAt).toLocaleString("ko-KR") : "없음"}</small></div>
       <div className="candidate-list">
         {visible.map(item => <button key={item.id} className={`candidate-row ${selected.id === item.id ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}>
-          <div className="row-status"><i className={`status-dot ${item.decision}`} /><ScoreGauge score={item.score} /></div>
+          <div className="row-status"><i className={`status-dot ${item.decision}`} /><ScoreGauge score={item.score} max={item.scoreMax} /></div>
           <div className="row-main"><h3>{item.summary}</h3><div><span className={`source-tag ${item.sourceTone}`}>{item.source}</span><span>{item.domain}</span><span>{item.time}</span>{item.recurrence >= 3 && <span className="repeat-tag">↻ {item.recurrence}회 반복</span>}</div></div>
           <div className={`market-badge ${item.marketVerdict}`}>{MARKET_LABEL[item.marketVerdict]}{item.marketVerdict !== "empty" && item.marketVerdict !== "public_owned" ? ` (${item.competitors})` : ""}</div>
           <span className={`status-label ${item.decision}`}>{STATUS_LABEL[item.decision]}</span>
@@ -276,13 +296,14 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
     <aside className="detail-pane">
       <div className="detail-scroll">
         <div className="detail-kicker"><span className={`source-tag ${selected.sourceTone}`}>{selected.source}</span><span>{selected.time}</span><span>ID · PF-{String(selected.id).padStart(4, "0")}</span></div>
-        <div className="detail-title"><div><h2>{selected.summary}</h2><p>{selected.who} · {selected.frequency} 발생</p></div><ScoreGauge score={selected.score} /></div>
+        <div className="detail-title"><div><h2>{selected.summary}</h2><p>{selected.who} · {selected.frequency} 발생</p></div><ScoreGauge score={selected.score} max={selected.scoreMax} /></div>
         <section className="detail-section original"><header><h3>원문 신호</h3><a href={selected.url} target="_blank" rel="noreferrer">원문 열기 ↗</a></header><blockquote>“{selected.excerpt}”</blockquote></section>
         <section className="detail-section analysis"><header><h3>LLM 분석</h3><span>구조화 분석 완료</span></header><dl><div><dt>누가</dt><dd>{selected.who}</dd></div><div><dt>현재 우회 수단</dt><dd>{selected.workaround}</dd></div><div><dt>신호 유형</dt><dd><span className="amber-text">{selected.signal}</span> · {selected.frequency}</dd></div><div><dt>지불 신호</dt><dd>{selected.money ? `“${selected.money}”` : <span className="muted">명시적 신호 없음</span>}</dd></div></dl></section>
         <section className="detail-section competitors"><header><h3>경쟁 검증 <b>{selected.rivals.length}</b></h3><span className={`market-badge ${selected.marketVerdict}`}>{MARKET_LABEL[selected.marketVerdict]}</span></header>
-          {selected.rivals.length ? <div className="rival-list">{selected.rivals.map(r => <a key={r.url || r.name} href={r.url} target="_blank" rel="noreferrer"><i className={`rival-state ${r.state}`} /> <strong>{r.name}</strong><span className={`pricing-badge ${r.pricing}`}>{PRICING_LABEL[r.pricing]}</span><p>{r.note}</p><em>↗</em></a>)}</div> : <div className="zero-rivals"><strong>확인된 제품 경쟁자가 없습니다.</strong><p>자동 합격이 아닙니다. 수요가 형성되지 않은 시장일 수 있어 직접 확인이 필요합니다.</p></div>}
+          <div className={`precision-status ${selected.precisionVerified ? "done" : "pending"}`}><div><strong>{selected.precisionVerified ? "정밀 검증 완료" : "정밀 검증 안 함"}</strong><small>{selected.precisionVerified ? "앱 마켓과 제품 페이지를 함께 확인했습니다." : "현재는 무료 앱 마켓 결과만 반영됐습니다."}</small></div><button onClick={() => void onVerify(selected.id)} disabled={Boolean(verifyingId)}>{verifyingId === selected.id ? <><i className="verify-spinner" /> 검증 중</> : <><kbd>V</kbd> {selected.precisionVerified ? "다시 검증" : "정밀 검증 실행"}</>}</button></div>
+          {selected.rivals.length ? <div className="rival-list">{selected.rivals.map(r => <a key={r.url || r.name} href={r.url} target="_blank" rel="noreferrer"><i className={`rival-state ${r.state}`} /> <strong>{r.name}</strong><span className={`pricing-badge ${r.pricing}`}>{PRICING_LABEL[r.pricing]}</span><p>{r.note}{r.seller ? ` · ${r.seller}` : ""}</p><em>↗</em></a>)}</div> : <div className="zero-rivals"><strong>확인된 제품 경쟁자가 없습니다.</strong><p>자동 합격이 아닙니다. 수요가 형성되지 않은 시장일 수 있어 직접 확인이 필요합니다.</p></div>}
         </section>
-        <section className="detail-section scorecard"><header><h3>6개 필터</h3><span>{selected.score} / 12점</span></header><div className="score-grid">{selected.scores.map(s => <div key={s.label}><span>{s.label}</span><div className="score-track"><i style={{ width: `${s.value * 50}%` }} /></div><b>{s.value}</b></div>)}</div><div className={`access-flag ${selected.access ? "stable" : "unstable"}`}><span>{selected.access ? "✓" : "!"}</span><div><strong>데이터 접근 {selected.access ? "안정" : "불안정"}</strong><small>{selected.access ? "공식 API 또는 공개 데이터 확인" : "공식 API가 없어 별도 검토 필요"}</small></div></div></section>
+        <section className="detail-section scorecard"><header><h3>4개 필터</h3><span>{selected.score} / {selected.scoreMax}점{selected.scoreMax === 12 ? " · 기존 기록" : ""}</span></header><div className="score-grid">{selected.scores.map(s => <div key={s.label}><span>{s.label}</span><div className="score-track"><i style={{ width: `${s.max ? s.value / s.max * 100 : 0}%` }} /></div><b>{s.value}</b></div>)}</div><div className={`access-flag ${selected.access ? "stable" : "unstable"}`}><span>{selected.access ? "✓" : "!"}</span><div><strong>데이터 접근 {selected.access ? "안정" : "불안정"}</strong><small>{selected.access ? "공식 API 또는 공개 데이터 확인" : "공식 API가 없어 별도 검토 필요"}</small></div></div></section>
       </div>
       <div className="decision-bar">
         {rejecting ? <div className="reject-form"><input autoFocus value={rejectReason} onChange={e => setRejectReason(e.target.value)} placeholder="기각 사유를 입력하세요" /><button onClick={() => onDecision("rejected")} disabled={!rejectReason.trim()}>기각 확정</button><button onClick={() => setRejecting(false)}>취소</button></div> : <><button className="track" onClick={() => onDecision("tracking")}><kbd>T</kbd> 추적</button><button onClick={() => onDecision("holding")}><kbd>H</kbd> 보류</button><button className="reject" onClick={() => setRejecting(true)}><kbd>X</kbd> 기각</button></>}
@@ -308,11 +329,13 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
   const [progress, setProgress] = useState(0);
   const [saved, setSaved] = useState(false);
   const [runMessage, setRunMessage] = useState("");
+  const [autoVerifyTopN, setAutoVerifyTopN] = useState(10);
   const configBody = () => ({
     name: "직접 검색",
     queries,
     sources: Object.fromEntries(sources.map(source => [source, true])),
     period_days: 7,
+    auto_verify_top_n: autoVerifyTopN,
     limits: { queries: Math.min(Math.max(queries.length, 1), 50), itemsPerSource: 500, dailyCostUsd: 3 },
   });
   const startRun = async () => {
@@ -347,7 +370,7 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
   return <div className="settings-wrap">
     <div className="settings-grid">
       <section className="setting-card search-card query-card"><header><span>01</span><div><h2>검색어</h2><p>입력한 문구를 조합하거나 바꾸지 않고 그대로 검색합니다.</p></div><small>{queries.length} / 50</small></header><label className="field-label">직접 검색어</label><div className="query-entry"><input value={queryInput} onChange={e => setQueryInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addQueries(); } }} placeholder="검색어 입력 후 Enter · 쉼표로 여러 개 추가" /><button onClick={addQueries}>추가</button></div><div className="query-tags">{queries.map((query, index) => <span key={query}><b>{String(index + 1).padStart(2, "0")}</b>{query}<button onClick={() => setQueries(current => current.filter(value => value !== query))} aria-label={`${query} 삭제`}>×</button></span>)}{!queries.length && <p>등록된 검색어가 없습니다. 검색할 문구를 직접 입력해 주세요.</p>}</div><label className="field-label">검색 소스</label><div className="source-options">{["네이버카페", "지식iN", "블로그", "웹문서", "Threads", "HN"].map(s => <button key={s} className={sources.includes(s) ? "on" : ""} onClick={() => toggleSource(s)}><i />{s}{s === "Threads" && <em>승인 필요</em>}</button>)}</div><p className="query-note">등록한 검색어를 선택한 각 소스에 한 번씩 그대로 요청합니다.</p></section>
-      <section className="setting-card limit-card"><header><span>02</span><div><h2>하드 상한</h2><p>예상 밖의 폭주를 코드와 설정에서 이중 차단합니다.</p></div></header><div className="limit-grid"><label>이번 실행 검색어<div><input type="number" value={queries.length} readOnly /><span>최대 50</span></div></label><label>소스별 수집 상한<div><input type="number" defaultValue="500" /><span>건</span></div></label><label>일일 비용 상한<div><b>$</b><input type="number" defaultValue="3" /><span>최대 $10</span></div></label></div><p className="limit-note"><span>!</span> 상한 도달 시 실행을 즉시 중단하고 로그에 이유를 남깁니다.</p></section>
+      <section className="setting-card limit-card"><header><span>02</span><div><h2>하드 상한</h2><p>예상 밖의 폭주를 코드와 설정에서 이중 차단합니다.</p></div></header><div className="limit-grid"><label>이번 실행 검색어<div><input type="number" value={queries.length} readOnly /><span>최대 50</span></div></label><label>소스별 수집 상한<div><input type="number" defaultValue="500" /><span>건</span></div></label><label>자동 정밀 검증<div><input type="number" min="0" max="40" value={autoVerifyTopN} onChange={event => setAutoVerifyTopN(Math.min(40, Math.max(0, Number(event.target.value) || 0)))} /><span>상위 N건</span></div></label><label>일일 비용 상한<div><b>$</b><input type="number" defaultValue="3" /><span>최대 $10</span></div></label></div><p className="limit-note"><span>!</span> 자동 정밀 검증을 0으로 두면 앱 마켓만 확인하며, 상세 화면의 V 버튼으로 개별 실행할 수 있습니다.</p></section>
     </div>
     <div className="settings-footer"><div>{progress > 0 && <><span>{running ? `파이프라인 실행 중 · ${progress}%` : runMessage}</span><div className="run-progress"><i style={{ width: `${progress}%` }} /></div></>}</div><button className="secondary" onClick={saveConfig}>{saved ? "✓ 저장됨" : "설정 저장"}</button><button className="primary" onClick={startRun} disabled={running}>{running ? `${progress}% 처리 중` : "▶ 지금 실행"}</button></div>
   </div>;
@@ -357,7 +380,7 @@ function ArchiveView({ items, onRestore }: { items: Candidate[]; onRestore: (id:
   const archived = items.filter(i => i.decision === "holding" || i.decision === "rejected");
   const [tab, setTab] = useState<"all" | Decision>("all");
   const shown = tab === "all" ? archived : archived.filter(i => i.decision === tab);
-  return <div className="page-pad"><div className="archive-tools"><div className="tabs"><button className={tab === "all" ? "active" : ""} onClick={() => setTab("all")}>전체 {archived.length}</button><button className={tab === "holding" ? "active" : ""} onClick={() => setTab("holding")}>보류 {archived.filter(i => i.decision === "holding").length}</button><button className={tab === "rejected" ? "active" : ""} onClick={() => setTab("rejected")}>기각 {archived.filter(i => i.decision === "rejected").length}</button></div><label className="searchbox"><span>⌕</span><input placeholder="보류함 검색" /></label></div>{shown.length ? <div className="archive-table"><div className="archive-head"><span>상태</span><span>후보</span><span>점수</span><span>사유</span><span>판정일</span><span /></div>{shown.map(i => <div className="archive-row" key={i.id}><span className={`status-label ${i.decision}`}>{STATUS_LABEL[i.decision]}</span><div><strong>{i.summary}</strong><small>{i.source} · {i.domain}</small></div><ScoreGauge score={i.score} /><p>{i.decisionReason ?? "사유 없음"}</p><time>{i.decidedAt ? new Date(i.decidedAt).toLocaleDateString("ko-KR") : "-"}</time><button onClick={() => onRestore(i.id)}>다시 검토 →</button></div>)}</div> : <div className="section-empty"><strong>보류하거나 기각한 후보가 없습니다.</strong><p>후보 검토 화면에서 판정하면 여기에 보존됩니다.</p></div>}</div>;
+  return <div className="page-pad"><div className="archive-tools"><div className="tabs"><button className={tab === "all" ? "active" : ""} onClick={() => setTab("all")}>전체 {archived.length}</button><button className={tab === "holding" ? "active" : ""} onClick={() => setTab("holding")}>보류 {archived.filter(i => i.decision === "holding").length}</button><button className={tab === "rejected" ? "active" : ""} onClick={() => setTab("rejected")}>기각 {archived.filter(i => i.decision === "rejected").length}</button></div><label className="searchbox"><span>⌕</span><input placeholder="보류함 검색" /></label></div>{shown.length ? <div className="archive-table"><div className="archive-head"><span>상태</span><span>후보</span><span>점수</span><span>사유</span><span>판정일</span><span /></div>{shown.map(i => <div className="archive-row" key={i.id}><span className={`status-label ${i.decision}`}>{STATUS_LABEL[i.decision]}</span><div><strong>{i.summary}</strong><small>{i.source} · {i.domain}</small></div><ScoreGauge score={i.score} max={i.scoreMax} /><p>{i.decisionReason ?? "사유 없음"}</p><time>{i.decidedAt ? new Date(i.decidedAt).toLocaleDateString("ko-KR") : "-"}</time><button onClick={() => onRestore(i.id)}>다시 검토 →</button></div>)}</div> : <div className="section-empty"><strong>보류하거나 기각한 후보가 없습니다.</strong><p>후보 검토 화면에서 판정하면 여기에 보존됩니다.</p></div>}</div>;
 }
 
 function LogsView({ runs }: { runs: RunLog[] }) {
@@ -376,11 +399,36 @@ function LogsView({ runs }: { runs: RunLog[] }) {
   const llm1 = Number(run.stageCounts.llm1Passed ?? 0);
   const llm2 = Number(run.stageCounts.llm2Analyzed ?? 0);
   const verified = Number(run.stageCounts.verified ?? 0);
-  const funnel = [["수집", collected], ["룰 통과", ruled], ["1차 통과", llm1], ["2차 분석", llm2], ["검증 완료", verified]] as const;
+  const appVerified = Number(run.stageCounts.appVerified ?? 0);
+  const llm1PassRate = Number(run.stageCounts.llm1_pass_rate ?? 0);
+  const rejectReasonCounts = (run.stageCounts.reject_reason_counts as Record<string, number> | undefined) ?? {};
+  const rejectEntries = Object.entries(rejectReasonCounts).filter(([, value]) => Number(value) > 0);
+  const funnel = [["수집", collected], ["룰 통과", ruled], ["1차 통과", llm1], ["2차 분석", llm2], ["앱 검증", appVerified], ["정밀 검증", verified]] as const;
   const startedAt = new Date(run.startedAt);
   const endedAt = run.endedAt ? new Date(run.endedAt) : null;
   const duration = endedAt ? Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)) : null;
   const statusLabel = run.status === "completed" ? "완료" : run.status === "running" ? "실행 중" : "중단";
 
-  return <div className="logs-layout"><aside className="run-list"><div className="run-list-head">최근 실행 <span>{runs.length}회</span></div>{runs.map((entry, i) => <button key={entry.id} className={active === i ? "active" : ""} onClick={() => setActive(i)}><div><strong>{new Date(entry.startedAt).toLocaleString("ko-KR")}</strong><span className={entry.status === "completed" ? "done" : "stopped"}>{entry.status === "completed" ? "완료" : entry.status === "running" ? "실행 중" : "중단"}</span></div><p>{entry.preset}</p><small>{Number(entry.stageCounts.collected ?? 0).toLocaleString()}건 수집 · ${entry.cost.toFixed(4)}</small></button>)}</aside><section className="run-detail"><div className="run-summary"><div><span>RUN / {run.id.slice(0, 8)}</span><h2>{run.preset}</h2><p>{startedAt.toLocaleString("ko-KR")}{duration !== null ? ` · ${Math.floor(duration / 60)}분 ${duration % 60}초` : ""}</p></div><div><span>추정 비용</span><strong>${run.cost.toFixed(4)}</strong><small>{statusLabel}</small></div></div>{run.stoppedReason && <div className="stop-alert"><span>!</span><div><strong>실행이 중단됨</strong><p>{run.stoppedReason}</p></div></div>}<section className="funnel-section"><header><h3>단계별 통과</h3><span>수집 대비 최종 {collected ? ((verified / collected) * 100).toFixed(1) : "0.0"}%</span></header><div className="funnel">{funnel.map(([label, value], i) => <div key={label} style={{ width: `${100 - i * 13}%` }}><span>{label}</span><strong>{value.toLocaleString()}</strong><small>{i === 0 ? "100%" : collected ? `${((value / collected) * 100).toFixed(1)}%` : "0.0%"}</small></div>)}</div></section><div className="log-metrics"><div><span>LLM 1차 통과</span><strong>{llm1}</strong><small>실제 기록</small></div><div><span>LLM 2차 분석</span><strong>{llm2}</strong><small>실제 기록</small></div><div><span>검증 완료</span><strong>{verified}</strong><small>실제 기록</small></div><div><span>오류</span><strong>{run.errors.length}</strong><small>{run.errors.length ? "확인 필요" : "없음"}</small></div></div><section className="error-log"><header><h3>실행 상태</h3></header><div><time>{endedAt ? endedAt.toLocaleTimeString("ko-KR") : startedAt.toLocaleTimeString("ko-KR")}</time><span className={run.status === "completed" ? "info-pill" : "warn-pill"}>{statusLabel}</span><p>{run.stoppedReason || run.errors[0] || "파이프라인 실행 기록이 정상적으로 저장되었습니다."}</p></div></section></section></div>;
+  return <div className="logs-layout">
+    <aside className="run-list">
+      <div className="run-list-head">최근 실행 <span>{runs.length}회</span></div>
+      {runs.map((entry, i) => <button key={entry.id} className={active === i ? "active" : ""} onClick={() => setActive(i)}>
+        <div><strong>{new Date(entry.startedAt).toLocaleString("ko-KR")}</strong><span className={entry.status === "completed" ? "done" : "stopped"}>{entry.status === "completed" ? "완료" : entry.status === "running" ? "실행 중" : "중단"}</span></div>
+        <p>{entry.preset}</p><small>{Number(entry.stageCounts.collected ?? 0).toLocaleString()}건 수집 · ${entry.cost.toFixed(4)}</small>
+      </button>)}
+    </aside>
+    <section className="run-detail">
+      <div className="run-summary"><div><span>RUN / {run.id.slice(0, 8)}</span><h2>{run.preset}</h2><p>{startedAt.toLocaleString("ko-KR")}{duration !== null ? ` · ${Math.floor(duration / 60)}분 ${duration % 60}초` : ""}</p></div><div><span>추정 비용</span><strong>${run.cost.toFixed(4)}</strong><small>{statusLabel}</small></div></div>
+      {run.stoppedReason && <div className="stop-alert"><span>!</span><div><strong>실행이 중단됨</strong><p>{run.stoppedReason}</p></div></div>}
+      <section className="funnel-section"><header><h3>단계별 통과</h3><span>수집 대비 정밀 검증 {collected ? ((verified / collected) * 100).toFixed(1) : "0.0"}%</span></header><div className="funnel">{funnel.map(([label, value], i) => <div key={label} style={{ width: `${100 - i * 11}%` }}><span>{label}</span><strong>{value.toLocaleString()}</strong><small>{i === 0 ? "100%" : collected ? `${((value / collected) * 100).toFixed(1)}%` : "0.0%"}</small></div>)}</div></section>
+      <div className="log-metrics">
+        <div><span>LLM 1차 통과</span><strong>{llm1}</strong><small>{Number(run.stageCounts.llm1Evaluated ?? 0)}건 판정</small></div>
+        <div><span>1차 통과율</span><strong>{(llm1PassRate * 100).toFixed(1)}%</strong><small>{llm1PassRate > 0.25 ? "25% 초과 경고" : "목표 10–15%"}</small></div>
+        <div><span>앱 검증</span><strong>{appVerified}</strong><small>모든 신규 후보</small></div>
+        <div><span>정밀 검증</span><strong>{verified}</strong><small>자동·수동 합계</small></div>
+      </div>
+      {rejectEntries.length > 0 && <section className="reject-breakdown"><header><h3>1차 기각 사유</h3><span>{rejectEntries.reduce((sum, [, value]) => sum + Number(value), 0)}건</span></header><div>{rejectEntries.map(([reason, count]) => <span key={reason}><b>{reason}</b>{count}</span>)}</div></section>}
+      <section className="error-log"><header><h3>실행 상태</h3></header><div><time>{endedAt ? endedAt.toLocaleTimeString("ko-KR") : startedAt.toLocaleTimeString("ko-KR")}</time><span className={run.status === "completed" ? "info-pill" : "warn-pill"}>{statusLabel}</span><p>{run.stoppedReason || run.errors[0] || "파이프라인 실행 기록이 정상적으로 저장되었습니다."}</p></div></section>
+    </section>
+  </div>;
 }
