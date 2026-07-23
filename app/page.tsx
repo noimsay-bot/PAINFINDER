@@ -334,20 +334,30 @@ function SignalsView({ items, onOpen }: { items: Candidate[]; onOpen: (id: strin
 
 type DiscoveryItem = { id: number; origin: "cafe" | "text_mining" | "industry"; term: string; category: string; source_ref: string; frequency: number };
 type CafeStat = { cafeId: string; cafeName: string | null; collected: number; passed: number; passRate: number };
-type IndustrySeed = { id: number; ksic_code: string; ksic_name: string; done: boolean; translation: Record<string, unknown> | null; translated_at: string | null };
-type DiscoveryData = { cafes: CafeStat[]; discoveries: DiscoveryItem[]; industries: IndustrySeed[]; seeds: Array<{ id: number; query_text: string; origin: string; last_used_at: string | null }>; error?: string };
+type IndustryTranslation = { roles?: string[]; tools?: string[]; tasks?: string[] };
+type IndustrySeed = { id: number; ksic_code: string; ksic_name: string; section: string | null; active: boolean; note: string | null; done: boolean; translation: IndustryTranslation | null; translated_at: string | null };
+type DiscoveryData = { cafes: CafeStat[]; insufficientCafes: CafeStat[]; discoveries: DiscoveryItem[]; industries: IndustrySeed[]; seeds: Array<{ id: number; query_text: string; origin: string; active: boolean; last_used_at: string | null }>; error?: string };
 
 const DISCOVERY_CATEGORY: Record<string, string> = {
   cafe_focus: "집중 수집어", tools: "도구", tasks: "업무", jargon: "현업 표현", roles: "직군",
 };
 
+const KSIC_SECTION_LABELS: Record<string, string> = {
+  G: "도소매", H: "운수·창고", I: "숙박·음식", J: "정보통신", K: "금융·보험", L: "부동산",
+  M: "전문·과학·기술", N: "사업지원·임대", P: "교육", Q: "보건·복지", R: "예술·스포츠", S: "개인 서비스",
+  CUSTOM: "카페 입력",
+};
+
 function DiscoveryView() {
   const [tab, setTab] = useState<"cafe" | "text_mining" | "industry">("cafe");
-  const [data, setData] = useState<DiscoveryData>({ cafes: [], discoveries: [], industries: [], seeds: [] });
+  const [data, setData] = useState<DiscoveryData>({ cafes: [], insufficientCafes: [], discoveries: [], industries: [], seeds: [] });
   const [selected, setSelected] = useState<number[]>([]);
+  const [industrySelected, setIndustrySelected] = useState<number[]>([]);
+  const [industrySearch, setIndustrySearch] = useState("");
+  const [industrySection, setIndustrySection] = useState("ALL");
+  const [industrySort, setIndustrySort] = useState<"pending" | "section">("pending");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
-  const [translateCount, setTranslateCount] = useState(3);
 
   const load = useCallback(async () => {
     try {
@@ -355,6 +365,7 @@ function DiscoveryView() {
       const payload = await response.json() as DiscoveryData;
       if (!response.ok) throw new Error(payload.error ?? "검색어 발굴 데이터를 불러오지 못했습니다.");
       setData(payload);
+      setIndustrySelected(current => current.filter(id => payload.industries.some(industry => industry.id === id && !industry.done)));
     } catch (error) { setMessage(error instanceof Error ? error.message : "검색어 발굴 데이터를 불러오지 못했습니다."); }
   }, []);
   useEffect(() => {
@@ -369,11 +380,11 @@ function DiscoveryView() {
       const response = await fetch("/api/discovery", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...extra }) });
       const result = await response.json() as { error?: string; added?: number; created?: number; translated?: number; calls?: number };
       if (!response.ok) throw new Error(result.error ?? "작업에 실패했습니다.");
-      if (action === "approve") { setMessage(`${result.added ?? 0}개 검색어를 시드에 추가했습니다.`); setSelected([]); }
+      if (action === "approve") { setMessage(tab === "industry" ? `${result.added ?? 0}개 검색어를 시드에 추가했습니다. 업종 출처 시드는 자동 실행에서 제외됩니다.` : `${result.added ?? 0}개 검색어를 시드에 추가했습니다.`); setSelected([]); }
       if (action === "cafe-focus") setMessage(`${result.created ?? 0}개 집중 수집어를 만들었습니다. 아래에서 승인할 항목을 고르세요.`);
       if (action === "cafe-to-industry") { setMessage("카페 이름을 업종 번역 대기열에 보냈습니다."); setTab("industry"); }
       if (action === "mine-text") setMessage(`${result.calls ?? 0}회 배치 호출로 ${result.created ?? 0}개 원문 어휘를 찾았습니다.`);
-      if (action === "translate-industries") setMessage(`${result.translated ?? 0}개 업종을 ${result.calls ?? 0}회 호출로 번역했습니다.`);
+      if (action === "translate-industries") { setMessage(`${result.translated ?? 0}개 업종을 ${result.calls ?? 0}회 호출로 번역했습니다.`); setIndustrySelected([]); }
       await load();
     } catch (error) { setMessage(error instanceof Error ? error.message : "작업에 실패했습니다."); }
     finally { setBusy(""); }
@@ -385,8 +396,21 @@ function DiscoveryView() {
     const other = current.filter(id => !candidates.some(item => item.id === id));
     return candidates.every(item => current.includes(item.id)) ? other : [...other, ...candidates.map(item => item.id)];
   });
-  const pendingIndustries = data.industries.filter(industry => !industry.done);
+  const activeIndustries = data.industries.filter(industry => industry.active);
+  const pendingIndustries = activeIndustries.filter(industry => !industry.done);
   const completedIndustries = data.industries.filter(industry => industry.done);
+  const visibleIndustries = activeIndustries
+    .filter(industry => industrySection === "ALL" || industry.section === industrySection)
+    .filter(industry => !industrySearch.trim() || industry.ksic_name.toLocaleLowerCase("ko-KR").includes(industrySearch.trim().toLocaleLowerCase("ko-KR")))
+    .sort((a, b) => {
+      if (industrySort === "pending" && a.done !== b.done) return a.done ? 1 : -1;
+      return String(a.section).localeCompare(String(b.section)) || a.ksic_code.localeCompare(b.ksic_code);
+    });
+  const toggleIndustry = (id: number) => setIndustrySelected(current => {
+    if (current.includes(id)) return current.filter(value => value !== id);
+    if (current.length >= 20) { setMessage("업종은 한 번에 최대 20개까지 선택할 수 있습니다."); return current; }
+    return [...current, id];
+  });
 
   return <div className="discovery-page">
     <div className="discovery-summary">
@@ -404,12 +428,19 @@ function DiscoveryView() {
     {message && <div className="discovery-message" role="status">{message}</div>}
 
     {tab === "cafe" && <section className="discovery-panel">
-      <header><div><span>AXIS A</span><h2>통과율 높은 카페부터 넓히기</h2><p>이미 수집한 URL만 집계합니다. 집중 수집 버튼은 검색어 후보만 만들며, 승인 전에는 실행하지 않습니다.</p></div></header>
+      <header><div><span>AXIS A</span><h2>통과 건수가 많은 카페부터 넓히기</h2><p>표본 5건 이상만 메인 랭킹에 표시하며, 통과 건수 → 통과율 순으로 정렬합니다. 집중 수집은 승인 전까지 실행되지 않습니다.</p></div></header>
       <div className="cafe-table">
         <div className="cafe-head"><span>카페 ID</span><span>카페명</span><span>수집</span><span>통과</span><span>통과율</span><span>활용</span></div>
-        {data.cafes.map(cafe => <div className="cafe-row" key={cafe.cafeId}><strong>{cafe.cafeId}</strong><span>{cafe.cafeName ?? "확인 불가"}</span><b>{cafe.collected}</b><b>{cafe.passed}</b><div><i style={{ width: `${Math.round(cafe.passRate * 100)}%` }} /><em>{(cafe.passRate * 100).toFixed(1)}%</em></div><div><button onClick={() => void runAction("cafe-focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>{busy === "cafe-focus" ? "생성 중" : "이 카페 집중 수집"}</button><button className="link-button" onClick={() => void runAction("cafe-to-industry", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>업종 번역으로 →</button></div></div>)}
-        {!data.cafes.length && <div className="discovery-empty">수집된 네이버 카페 URL이 없습니다.</div>}
+        {data.cafes.map(cafe => <div className="cafe-row" key={cafe.cafeId}><strong>{cafe.cafeId}</strong><span>{cafe.cafeName ?? cafe.cafeId}</span><b>{cafe.collected}</b><b>{cafe.passed}</b><div><i style={{ width: `${Math.round(cafe.passRate * 100)}%` }} /><em>{(cafe.passRate * 100).toFixed(1)}%</em></div><div><button onClick={() => void runAction("cafe-focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>{busy === "cafe-focus" ? "생성 중" : "이 카페 집중 수집"}</button><button className="link-button" onClick={() => void runAction("cafe-to-industry", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>업종 번역으로 →</button></div></div>)}
+        {!data.cafes.length && <div className="discovery-empty">표본 5건 이상인 네이버 카페가 없습니다.</div>}
       </div>
+      <details className="insufficient-cafes">
+        <summary>표본 부족 · 수집 5건 미만 <b>{data.insufficientCafes.length}</b></summary>
+        <div className="cafe-table">
+          <div className="cafe-head compact"><span>카페 ID</span><span>표시명</span><span>수집</span><span>통과</span><span>통과율</span><span>상태</span></div>
+          {data.insufficientCafes.map(cafe => <div className="cafe-row compact" key={cafe.cafeId}><strong>{cafe.cafeId}</strong><span>{cafe.cafeName ?? cafe.cafeId}</span><b>{cafe.collected}</b><b>{cafe.passed}</b><div><i style={{ width: `${Math.round(cafe.passRate * 100)}%` }} /><em>{(cafe.passRate * 100).toFixed(1)}%</em></div><span className="sample-badge">표본 부족</span></div>)}
+        </div>
+      </details>
       <CandidateApproval items={candidates} selected={selected} toggle={toggle} selectAll={selectAll} onApprove={() => void runAction("approve", { ids: selected.filter(id => candidates.some(item => item.id === id)) })} busy={busy} />
     </section>}
 
@@ -419,8 +450,25 @@ function DiscoveryView() {
     </section>}
 
     {tab === "industry" && <section className="discovery-panel">
-      <header className="action-header"><div><span>AXIS C</span><h2>공식 업종명을 현업 어휘로 번역하기</h2><p>KSIC 명칭은 검색에 쓰지 않습니다. 선택한 개수만 roles/tools/tasks로 번역하며 tools와 tasks를 우선합니다.</p></div><div className="translate-control"><input type="number" min="1" max="20" value={translateCount} onChange={event => setTranslateCount(Math.min(20, Math.max(1, Number(event.target.value) || 1)))} aria-label="번역할 업종 수" /><button onClick={() => void runAction("translate-industries", { count: translateCount })} disabled={Boolean(busy) || !pendingIndustries.length}>{busy === "translate-industries" ? "번역 중…" : `${translateCount}개 업종 번역`}</button></div></header>
-      <div className="industry-queue"><div><strong>다음 번역 대기열</strong><span>{pendingIndustries.length}개 남음</span></div>{pendingIndustries.slice(0, 12).map(industry => <p key={industry.id}><b>{industry.ksic_code}</b><span>{industry.ksic_name}</span></p>)}{!pendingIndustries.length && <div className="discovery-empty">모든 업종을 처리했습니다.</div>}</div>
+      <header className="action-header"><div><span>AXIS C</span><h2>서비스업을 골라 현업 어휘로 번역하기</h2><p>활성 서비스업만 표시합니다. 관심 업종을 직접 선택하며, 소프트웨어로 해결 가능한 관리·사무·거래 어휘만 후보로 남깁니다.</p></div><button onClick={() => void runAction("translate-industries", { industryIds: industrySelected })} disabled={Boolean(busy) || !industrySelected.length}>{busy === "translate-industries" ? "번역 중…" : `선택 ${industrySelected.length}개 번역`}</button></header>
+      <div className="industry-browser">
+        <div className="industry-tools">
+          <label><span>업종 검색</span><input type="search" value={industrySearch} onChange={event => setIndustrySearch(event.target.value)} placeholder="영상, 미용, 학원…" /></label>
+          <label><span>정렬</span><select value={industrySort} onChange={event => setIndustrySort(event.target.value as "pending" | "section")}><option value="pending">미처리 우선</option><option value="section">대분류순</option></select></label>
+          <strong>{visibleIndustries.length}개 표시 · {pendingIndustries.length}개 미처리</strong>
+        </div>
+        <div className="industry-chips" aria-label="KSIC 대분류 필터">
+          <button className={industrySection === "ALL" ? "active" : ""} onClick={() => setIndustrySection("ALL")}>전체</button>
+          {Object.entries(KSIC_SECTION_LABELS).map(([code, label]) => <button key={code} className={industrySection === code ? "active" : ""} onClick={() => setIndustrySection(code)}><b>{code === "CUSTOM" ? "+" : code}</b>{label}</button>)}
+        </div>
+        <div className="industry-list">
+          {visibleIndustries.map(industry => <div className={`industry-row ${industry.done ? "done" : ""}`} key={industry.id}>
+            <label><input type="checkbox" checked={industrySelected.includes(industry.id)} onChange={() => toggleIndustry(industry.id)} disabled={industry.done || Boolean(busy)} /><span className="section-code">{industry.section === "CUSTOM" ? "+" : industry.section}</span><b>{industry.ksic_code}</b><strong>{industry.ksic_name}</strong><em>{industry.done ? "완료" : "미처리"}</em></label>
+            {industry.done && industry.translation && <details><summary>번역 결과 보기</summary><div>{(["roles", "tools", "tasks"] as const).map(category => <section key={category}><b>{DISCOVERY_CATEGORY[category]}</b><p>{industry.translation?.[category]?.join(" · ") || "결과 없음"}</p></section>)}</div></details>}
+          </div>)}
+          {!visibleIndustries.length && <div className="discovery-empty">조건에 맞는 활성 서비스업이 없습니다.</div>}
+        </div>
+      </div>
       <CandidateApproval items={candidates} selected={selected} toggle={toggle} selectAll={selectAll} onApprove={() => void runAction("approve", { ids: selected.filter(id => candidates.some(item => item.id === id)) })} busy={busy} />
     </section>}
   </div>;

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isActiveIndustryCode, isSoftwareRelevantVocabulary, ksicSection, rankCafeStats, sanitizeIndustryTranslation } from "@/lib/discovery";
 import { getLlmProvider, resolveLlmModel } from "@/lib/llm";
 import { KSIC_SEEDS } from "@/lib/ksic-seeds";
 import { supabaseRest } from "@/lib/pipeline";
@@ -31,6 +32,50 @@ function normalizeTerm(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").trim().slice(0, 80);
 }
 
+function decodeHtml(value: string) {
+  return value
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)));
+}
+
+function cafeNameFromHtml(html: string) {
+  const metaPatterns = [
+    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i,
+  ];
+  const raw = metaPatterns.map(pattern => html.match(pattern)?.[1]).find(Boolean) ?? html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+  if (!raw) return null;
+  const name = decodeHtml(raw).replace(/\s*[:|–—-]\s*네이버\s*카페\s*$/i, "").trim();
+  return name && !/^네이버\s*카페$/i.test(name) ? name.slice(0, 120) : null;
+}
+
+async function fetchAndCacheCafeName(cafeId: string) {
+  let cafeName: string | null = null;
+  let fetchError: string | null = null;
+  try {
+    const response = await fetch(`https://cafe.naver.com/${encodeURIComponent(cafeId)}`, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; Painfinder/1.0; +https://painfinder-murex.vercel.app)" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    cafeName = cafeNameFromHtml(await response.text());
+    if (!cafeName) throw new Error("카페명 메타데이터 없음");
+  } catch (error) {
+    fetchError = error instanceof Error ? error.message.slice(0, 200) : "조회 실패";
+  }
+  await supabaseRest("cafe_names?on_conflict=cafe_id", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({ cafe_id: cafeId, cafe_name: cafeName, fetched_at: new Date().toISOString(), fetch_error: fetchError }),
+  });
+  return cafeName;
+}
+
 async function existingSeedTerms() {
   const rows = await supabaseRest("seed_queries?select=query_text&limit=5000") as Row[] | null;
   return new Set((rows ?? []).map(row => normalizeTerm(row.query_text).toLocaleLowerCase("ko-KR")));
@@ -59,7 +104,12 @@ async function ensureIndustrySeeds() {
     await supabaseRest("industry_seeds?on_conflict=ksic_code", {
       method: "POST",
       headers: { Prefer: "resolution=ignore-duplicates" },
-      body: JSON.stringify(missing.slice(offset, offset + 100).map(([ksic_code, ksic_name]) => ({ ksic_code, ksic_name }))),
+      body: JSON.stringify(missing.slice(offset, offset + 100).map(([ksic_code, ksic_name]) => ({
+        ksic_code,
+        ksic_name,
+        section: ksicSection(ksic_code),
+        active: isActiveIndustryCode(ksic_code),
+      }))),
     });
   }
 }
@@ -76,19 +126,47 @@ async function loadCafeStats() {
     item.text.push(`${String(row.title ?? "")} ${String(row.body ?? "")}`);
     stats.set(cafeId, item);
   }
-  return [...stats.values()].map(item => ({ cafeId: item.cafeId, cafeName: item.cafeName, collected: item.collected, passed: item.passed, passRate: item.collected ? item.passed / item.collected : 0 }))
-    .sort((a, b) => b.passRate - a.passRate || b.passed - a.passed || b.collected - a.collected);
+  const ranked = rankCafeStats([...stats.values()].map(item => ({
+    cafeId: item.cafeId,
+    cafeName: item.cafeName,
+    collected: item.collected,
+    passed: item.passed,
+    passRate: item.collected ? item.passed / item.collected : 0,
+  })));
+  const main = ranked.filter(item => item.collected >= 5);
+  const insufficient = ranked.filter(item => item.collected < 5);
+  const cachedRows = await supabaseRest("cafe_names?select=cafe_id,cafe_name,fetched_at,fetch_error&limit=1000") as Row[] | null;
+  const cached = new Map((cachedRows ?? []).map(row => [String(row.cafe_id), row]));
+  const missing = main.filter(item => !cached.has(item.cafeId));
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < missing.length) {
+      const item = missing[cursor++];
+      item.cafeName = await fetchAndCacheCafeName(item.cafeId);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, missing.length) }, () => worker()));
+  for (const item of main) {
+    const row = cached.get(item.cafeId);
+    if (row?.cafe_name) item.cafeName = String(row.cafe_name);
+  }
+  return { main, insufficient };
 }
 
 async function discoveryPayload() {
   await ensureIndustrySeeds();
-  const [cafes, discoveries, industries, seedRows] = await Promise.all([
+  const [cafeStats, discoveryRows, industries, seedRows] = await Promise.all([
     loadCafeStats(),
     supabaseRest("query_discoveries?approved_at=is.null&select=id,origin,term,category,source_ref,frequency,created_at&order=frequency.desc,created_at.desc&limit=1000") as Promise<Row[] | null>,
-    supabaseRest("industry_seeds?select=id,ksic_code,ksic_name,done,translation,translated_at&order=done.asc,id.asc&limit=500") as Promise<Row[] | null>,
-    supabaseRest("seed_queries?active=eq.true&select=id,query_text,origin,last_used_at&order=last_used_at.asc.nullsfirst,id.asc&limit=5000") as Promise<Row[] | null>,
+    supabaseRest("industry_seeds?active=eq.true&select=id,ksic_code,ksic_name,section,active,note,done,translation,translated_at&order=section.asc,ksic_code.asc&limit=500") as Promise<Row[] | null>,
+    supabaseRest("seed_queries?select=id,query_text,origin,active,last_used_at&order=last_used_at.asc.nullsfirst,id.asc&limit=5000") as Promise<Row[] | null>,
   ]);
-  return { cafes, discoveries: discoveries ?? [], industries: industries ?? [], seeds: seedRows ?? [] };
+  const activeIndustryIds = new Set((industries ?? []).map(row => String(row.id)));
+  const discoveries = (discoveryRows ?? []).filter(row =>
+    row.origin !== "industry" ||
+    (activeIndustryIds.has(String(row.source_ref)) && isSoftwareRelevantVocabulary(String(row.term ?? "")))
+  );
+  return { cafes: cafeStats.main, insufficientCafes: cafeStats.insufficient, discoveries, industries: industries ?? [], seeds: seedRows ?? [] };
 }
 
 export async function GET() {
@@ -98,7 +176,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { action?: string; ids?: number[]; cafeId?: string; count?: number };
+    const body = await request.json() as { action?: string; ids?: number[]; cafeId?: string; industryIds?: number[] };
     if (body.action === "approve") {
       const ids = [...new Set((body.ids ?? []).map(Number).filter(Number.isFinite))].slice(0, 200);
       if (!ids.length) return NextResponse.json({ added: 0 });
@@ -108,7 +186,7 @@ export async function POST(request: Request) {
         family: "question",
         query_text: normalizeTerm(row.term),
         domain: normalizeTerm(row.category) || "검색어 발굴",
-        active: true,
+        active: row.origin !== "industry",
         origin: normalizeTerm(row.origin),
       }));
       if (additions.length) await supabaseRest("seed_queries", { method: "POST", body: JSON.stringify(additions) });
@@ -134,9 +212,11 @@ export async function POST(request: Request) {
     if (body.action === "cafe-to-industry") {
       const cafeId = normalizeTerm(body.cafeId);
       if (!cafeId) return NextResponse.json({ error: "카페 ID가 필요합니다." }, { status: 400 });
+      const cached = await supabaseRest(`cafe_names?cafe_id=eq.${encodeURIComponent(cafeId)}&select=cafe_name&limit=1`) as Row[] | null;
+      const cafeName = normalizeTerm(cached?.[0]?.cafe_name) || cafeId;
       await supabaseRest("industry_seeds?on_conflict=ksic_code", {
         method: "POST", headers: { Prefer: "resolution=ignore-duplicates" },
-        body: JSON.stringify({ ksic_code: `CAFE:${cafeId}`, ksic_name: cafeId, done: false }),
+        body: JSON.stringify({ ksic_code: `CAFE:${cafeId}`, ksic_name: cafeName, section: "CUSTOM", active: true, note: "카페 역채굴 입력", done: false }),
       });
       return NextResponse.json({ added: true });
     }
@@ -167,28 +247,39 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "translate-industries") {
-      const count = Math.min(20, Math.max(1, Math.floor(Number(body.count) || 1)));
-      const rows = await supabaseRest(`industry_seeds?done=eq.false&select=id,ksic_code,ksic_name&order=id.asc&limit=${count}`) as Row[] | null;
+      const industryIds = [...new Set((body.industryIds ?? []).map(Number).filter(Number.isFinite))].slice(0, 20);
+      if (!industryIds.length) return NextResponse.json({ error: "번역할 업종을 선택해 주세요." }, { status: 400 });
+      const selectedRows = await supabaseRest(`industry_seeds?id=in.(${industryIds.join(",")})&active=eq.true&done=eq.false&select=id,ksic_code,ksic_name,section`) as Row[] | null;
+      const rowById = new Map((selectedRows ?? []).map(row => [Number(row.id), row]));
+      const rows = industryIds.map(id => rowById.get(id)).filter((row): row is Row => Boolean(row));
       const llm = getLlmProvider();
       let calls = 0;
       let created = 0;
-      for (const row of rows ?? []) {
+      for (const row of rows) {
         const completion = await llm.complete({
           model: resolveLlmModel(undefined, "stage1"), jsonMode: true, maxOutputTokens: 1200,
-          system: "너는 한국 현업 커뮤니티의 실제 어휘를 제안하는 산업 용어 번역기다. 유효한 JSON 객체만 응답하라.",
-          user: `"${String(row.ksic_name)}"에 종사하는 사람들이 네이버 카페나 커뮤니티에서 자기 일을 이야기할 때 실제로 쓰는 표현을 뽑아라. 분류상의 공식 명칭을 반복하지 말고 당사자들이 쓰는 말이어야 한다. tools와 tasks를 roles보다 우선해 구체적으로 작성하라. {"roles":["직군 호칭"],"tools":["도구·장비·프로그램명"],"tasks":["업무 표현"]} 형식으로 응답하라.`,
+          system: "너는 한국 현업 커뮤니티의 실제 어휘를 제안하는 산업 용어 번역기다. 소프트웨어로 해결 가능한 정보·관리 업무만 다루고 유효한 JSON 객체만 응답하라.",
+          user: `"${String(row.ksic_name)}"에 종사하는 사람들이 네이버 카페나 커뮤니티에서 자기 일을 이야기할 때 실제로 쓰는 표현을 뽑아라. 분류상의 공식 명칭이 아니라 당사자들이 쓰는 말이어야 한다.
+
+중요 제약:
+- 소프트웨어·앱·웹으로 해결될 수 있는 정보·관리·사무·거래·고객 관련 업무만 포함하라.
+- 물리적 작업 동사(자르다, 뜨다, 포장하다, 운반하다, 세척하다 등), 손으로 하는 육체 노동, 장비·기계 명칭은 제외하라.
+- 관리·기록·정산·예약·고객응대·일정·문서·재고·매출 등 반복되면 도구가 필요해지는 업무에 집중하라.
+- tools에는 소프트웨어·플랫폼·서비스명만 넣고 물리 장비는 절대 넣지 마라.
+
+{"roles":["직군 호칭"],"tools":["소프트웨어·플랫폼·서비스명"],"tasks":["관리·사무·거래 성격의 반복 업무"]} 형식으로 응답하라.`,
         });
         calls++;
-        const parsed = JSON.parse(completion.text) as Record<string, unknown>;
+        const parsed = sanitizeIndustryTranslation(JSON.parse(completion.text) as Record<string, unknown>);
         const inputs: DiscoveryInput[] = [];
         for (const category of ["roles", "tools", "tasks"] as const) for (const rawTerm of Array.isArray(parsed[category]) ? parsed[category] as unknown[] : []) {
           const term = normalizeTerm(rawTerm);
-          if (term) inputs.push({ origin: "industry", term, category, source_ref: String(row.id), frequency: category === "roles" ? 1 : 2 });
+          if (term && (category === "roles" || isSoftwareRelevantVocabulary(term))) inputs.push({ origin: "industry", term, category, source_ref: String(row.id), frequency: category === "roles" ? 1 : 2 });
         }
         created += (await saveDiscoveries(inputs)).length;
         await supabaseRest(`industry_seeds?id=eq.${encodeURIComponent(String(row.id))}`, { method: "PATCH", body: JSON.stringify({ done: true, translation: parsed, translated_at: new Date().toISOString() }) });
       }
-      return NextResponse.json({ translated: rows?.length ?? 0, calls, created });
+      return NextResponse.json({ translated: rows.length, calls, created });
     }
 
     return NextResponse.json({ error: "지원하지 않는 작업입니다." }, { status: 400 });

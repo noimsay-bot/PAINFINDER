@@ -11,6 +11,7 @@
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "test:llm": "tsx --test tests/llm-provider.test.ts tests/competitors.test.ts tests/scoring.test.ts",
+    "test:discovery": "tsx --test tests/discovery.test.ts",
     "validate:precision": "node --env-file=.env.local --import tsx scripts/validate-precision.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"

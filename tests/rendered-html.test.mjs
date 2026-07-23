@@ -40,6 +40,9 @@ test("미검증 표시와 승인형 검색어 발굴 경로를 코드에 고정�
   assert.match(discovery, /body\.action === "approve"/);
   assert.match(discovery, /body\.action === "mine-text"/);
   assert.match(discovery, /body\.action === "translate-industries"/);
+  assert.match(discovery, /industryIds/);
+  assert.match(discovery, /active=eq\.true/);
   assert.match(schema, /create table if not exists industry_seeds/);
+  assert.match(schema, /create table if not exists cafe_names/);
   assert.match(schema, /create table if not exists query_discoveries/);
 });

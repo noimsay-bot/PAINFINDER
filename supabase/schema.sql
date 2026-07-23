@@ -105,9 +105,19 @@ create table if not exists industry_seeds (
   ksic_code text not null unique,
   ksic_name text not null,
   done boolean not null default false,
+  active boolean not null default true,
+  section text,
+  note text,
   translation jsonb,
   translated_at timestamptz,
   created_at timestamptz not null default now()
+);
+
+create table if not exists cafe_names (
+  cafe_id text primary key,
+  cafe_name text,
+  fetched_at timestamptz not null default now(),
+  fetch_error text
 );
 
 create table if not exists query_discoveries (
@@ -136,4 +146,5 @@ create index if not exists raw_items_collected_idx on raw_items(collected_at des
 create index if not exists decisions_pain_point_idx on decisions(pain_point_id, decided_at desc);
 create index if not exists query_discoveries_pending_idx on query_discoveries(origin, approved_at, frequency desc);
 create index if not exists industry_seeds_round_robin_idx on industry_seeds(done, created_at, id);
+create index if not exists industry_seeds_active_section_idx on industry_seeds(active, section, done, ksic_code);
 create index if not exists pain_points_embedding_idx on pain_points using hnsw (embedding vector_cosine_ops);
