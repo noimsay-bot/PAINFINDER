@@ -1,5 +1,5 @@
-import { DEFAULT_LIMITS, HARD_LIMITS } from "./limits";
-import { classifyMarket, mergeProducts, searchAppMarket, verifyMarket, type MarketVerdict, type ProductCompetitor, type VerificationCounts } from "./competitors";
+import { DEFAULT_LIMITS, HARD_LIMITS, RUN_TIME_BUDGET, hasRunProcessingBudget } from "./limits";
+import { classifyMarket, createAppMarketSearchContext, mergeProducts, searchAppMarket, verifyMarket, type MarketVerdict, type ProductCompetitor, type VerificationCounts } from "./competitors";
 import { getLlmProvider, LlmProviderError, resolveLlmModel, type LlmResult } from "./llm";
 import { calculateLlmCost } from "./llm/pricing";
 import { normalizeNaverText, searchNaver, type NaverSearchType } from "./naver";
@@ -64,6 +64,14 @@ type Analysis = {
   maintenance_score: number;
 };
 
+export type RunPipelineOptions = {
+  deadlineAt?: number;
+  llm1MaxCalls?: number;
+  llm2MaxCalls?: number;
+};
+
+type RunGuard = () => boolean;
+
 const SOURCE_MAP: Record<string, NaverSearchType> = {
   naverCafe: "cafearticle", naverKin: "kin", naverBlog: "blog", naverWeb: "webkr",
   "네이버카페": "cafearticle", "지식iN": "kin", "블로그": "blog", "웹문서": "webkr",
@@ -104,19 +112,24 @@ function isJunk(item: RawSignal, excluded: string[]) {
   return false;
 }
 
-async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[]) {
+async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard) {
   const clientId = process.env.NAVER_CLIENT_ID;
   const clientSecret = process.env.NAVER_CLIENT_SECRET;
   if (!clientId || !clientSecret) return [] as RawSignal[];
   const enabled = Object.entries(config.sources).filter(([key, enabled]) => enabled && SOURCE_MAP[key]);
   const collected: RawSignal[] = [];
   for (const [key] of enabled) {
+    if (!canContinue()) break;
     const type = SOURCE_MAP[key];
     for (const query of queries) {
-      if (collected.filter(i => i.source === type).length >= config.limits.itemsPerSource) break;
+      if (!canContinue()) break;
+      const sourceCount = collected.filter(i => i.source === type).length;
+      const remaining = config.limits.itemsPerSource - sourceCount;
+      if (remaining <= 0) break;
       try {
-        const items = await searchNaver({ type, query, display: Math.min(100, config.limits.itemsPerSource), sort: "date", clientId, clientSecret });
-        for (const item of items) {
+        const fairShare = Math.max(1, Math.ceil(config.limits.itemsPerSource / queries.length));
+        const items = await searchNaver({ type, query, display: Math.min(100, fairShare, remaining), sort: "date", clientId, clientSecret });
+        for (const item of items.slice(0, remaining)) {
           const url = String(item.link ?? "");
           if (!url) continue;
           collected.push({ source: type, source_id: url, url, title: String(item.title ?? ""), body: String(item.description ?? ""), posted_at: item.postdate ? String(item.postdate) : null });
@@ -127,10 +140,11 @@ async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries:
   return collected;
 }
 
-async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[]) {
+async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard) {
   if (!config.sources.hn && !config.sources.HN) return [] as RawSignal[];
   const result: RawSignal[] = [];
   for (const query of queries.slice(0, 5)) {
+    if (!canContinue()) break;
     try {
       const response = await fetch(`https://hn.algolia.com/api/v1/search?tags=story&query=${encodeURIComponent(query)}`);
       if (!response.ok) throw new Error(String(response.status));
@@ -144,12 +158,13 @@ async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: st
   return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.hn);
 }
 
-async function collectThreads(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[]) {
+async function collectThreads(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard) {
   if (!config.sources.threads && !config.sources.Threads) return [] as RawSignal[];
   const token = process.env.THREADS_ACCESS_TOKEN;
   if (!token) { errors.push("threads:access-token-missing"); return []; }
   const result: RawSignal[] = [];
   for (const query of queries.slice(0, 20)) {
+    if (!canContinue()) break;
     try {
       const url = new URL("https://graph.threads.net/v1.0/keyword_search");
       url.searchParams.set("q", query); url.searchParams.set("search_type", "RECENT");
@@ -161,10 +176,11 @@ async function collectThreads(config: ReturnType<typeof normalizeConfig>, querie
   return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.threads);
 }
 
-async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, errors: string[]) {
+async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, errors: string[], canContinue: RunGuard) {
   if (!config.sources.appstore && !config.sources["앱리뷰"]) return [] as RawSignal[];
   const result: RawSignal[] = [];
   for (const app of config.app_list.filter(a => a.platform === "ios")) {
+    if (!canContinue()) break;
     try {
       const country = app.country ?? "kr";
       const response = await fetch(`https://itunes.apple.com/${country}/rss/customerreviews/id=${encodeURIComponent(app.appId)}/sortBy=mostRecent/json`);
@@ -209,13 +225,29 @@ function normalizeAnalysis(value: Partial<Analysis>, item: RawSignal): Analysis 
   };
 }
 
-export async function runPipeline(input: RunConfig) {
+export async function runPipeline(input: RunConfig, options: RunPipelineOptions = {}) {
   const config = normalizeConfig(input);
   const startedAt = new Date().toISOString();
+  const deadlineAt = options.deadlineAt ?? Date.now() + RUN_TIME_BUDGET.DEADLINE_MS;
+  let timeBudgetReached = false;
+  const canContinue = () => {
+    const available = hasRunProcessingBudget(deadlineAt);
+    if (!available) timeBudgetReached = true;
+    return available;
+  };
+  const llm1MaxCalls = Math.min(options.llm1MaxCalls ?? DEFAULT_LIMITS.LLM1_MAX_CALLS_PER_RUN, DEFAULT_LIMITS.LLM1_MAX_CALLS_PER_RUN);
+  const llm2MaxCalls = Math.min(options.llm2MaxCalls ?? DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN, DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN);
   const errors: string[] = [];
   const queries = makeQueries(config);
   if (!queries.length) throw new Error("검색어를 1개 이상 입력해 주세요.");
-  const collected = await Promise.all([collectNaver(config, queries, errors), collectHn(config, queries, errors), collectThreads(config, queries, errors), collectAppReviews(config, errors)]).then(parts => parts.flat());
+  const collected = canContinue()
+    ? await Promise.all([
+      collectNaver(config, queries, errors, canContinue),
+      collectHn(config, queries, errors, canContinue),
+      collectThreads(config, queries, errors, canContinue),
+      collectAppReviews(config, errors, canContinue),
+    ]).then(parts => parts.flat())
+    : [];
   const deduped = [...new Map(collected.map(item => [`${item.source}:${item.source_id}`, item])).values()];
   const filtered = deduped.filter(item => !isJunk(item, config.excluded_domains));
   const llm = getLlmProvider();
@@ -226,7 +258,12 @@ export async function runPipeline(input: RunConfig) {
   let inputTokens = 0;
   let outputTokens = 0;
   let runningCost = 0;
-  let stoppedReason: string | null = null;
+  let stoppedReason: string | null = timeBudgetReached ? "time_budget" : null;
+  const stopIfTimeBudgetReached = () => {
+    if (canContinue()) return false;
+    stoppedReason ??= "time_budget";
+    return true;
+  };
   const recordUsage = (result: LlmResult) => {
     inputTokens += result.inputTokens;
     outputTokens += result.outputTokens;
@@ -253,7 +290,8 @@ export async function runPipeline(input: RunConfig) {
   const rejectReasons = new Set<RejectReason>(["구직", "구매문의", "가격불만", "일회성", "정보질문", "학습", "홍보", "해결됨", "기타"]);
   const stage1: Stage1[] = [];
   let llm1Calls = 0;
-  for (let offset = 0; offset < filtered.length && llm1Calls < DEFAULT_LIMITS.LLM1_MAX_CALLS_PER_RUN && !stoppedReason; offset += 20) {
+  for (let offset = 0; offset < filtered.length && llm1Calls < llm1MaxCalls && !stoppedReason; offset += 20) {
+    if (stopIfTimeBudgetReached()) break;
     const batch = filtered.slice(offset, offset + 20);
     try {
       const completion = await llm.complete({
@@ -290,13 +328,14 @@ export async function runPipeline(input: RunConfig) {
   if (llm1PassRate > 0.25) errors.push(`warning:llm1:pass-rate-high:${(llm1PassRate * 100).toFixed(1)}%`);
   const rejectReasonCounts = Object.fromEntries([...rejectReasons].map(reason => [reason, stage1.filter(result => !result.pass && result.reject_reason === reason).length]));
   const passedIndexes = stage1.filter(result => result.pass).map(result => Number(result.id)).filter(Number.isFinite);
-  const passed = passedIndexes.map(index => filtered[index]).filter(Boolean).slice(0, DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN);
+  const passed = passedIndexes.map(index => filtered[index]).filter(Boolean).slice(0, llm2MaxCalls);
   const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: ProductCompetitor[]; marketVerdict: MarketVerdict; scores: FourScores; precisionVerified: boolean }> = [];
   let llm2Calls = 0;
   let verifyCalls = 0;
   const verificationCounts: VerificationCounts = { urlExcluded: 0, product: 0, content: 0, irrelevant: 0, appProduct: 0 };
   for (const raw of passed) {
     if (stoppedReason) break;
+    if (stopIfTimeBudgetReached()) break;
     let analysis = fallbackAnalysis(raw);
     let stopAfterItem = false;
     try {
@@ -324,10 +363,12 @@ export async function runPipeline(input: RunConfig) {
   }
 
   let appIndex = 0;
+  const appMarketContext = createAppMarketSearchContext();
   const appWorker = async () => {
     while (appIndex < analyses.length) {
+      if (stoppedReason || stopIfTimeBudgetReached()) return;
       const candidate = analyses[appIndex++];
-      const appVerification = await searchAppMarket(candidate.analysis.domain);
+      const appVerification = await searchAppMarket(candidate.analysis.domain, appMarketContext);
       candidate.competitors = appVerification.products;
       // App-market lookup is only a partial input. Until precision verification
       // finishes, the market state and incumbent score must remain unknown.
@@ -344,6 +385,7 @@ export async function runPipeline(input: RunConfig) {
   let verifyIndex = 0;
   const verifyWorker = async () => {
     while (verifyIndex < autoTargets.length && !stoppedReason) {
+      if (stopIfTimeBudgetReached()) return;
       const candidate = autoTargets[verifyIndex++];
       try {
         const verification = await verifyMarket({ searchTerms: candidate.analysis.search_terms_for_verification, llm, model: verifyModel, naverClientId: process.env.NAVER_CLIENT_ID, naverClientSecret: process.env.NAVER_CLIENT_SECRET });
@@ -401,32 +443,107 @@ export async function supabaseRest(path: string, init: RequestInit = {}) {
 export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>) {
   const created = await supabaseRest("run_logs", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ config_id: result.config.id ?? null, started_at: result.startedAt, ended_at: result.endedAt, stage_counts: result.stageCounts, llm_calls: result.llmCalls, cost_estimate: result.costEstimate, stopped_reason: result.stoppedReason, errors: result.errors }) }) as Array<{ id: string }> | null;
   const runId = created?.[0]?.id;
-  if (!runId) return null;
-  for (let offset = 0; offset < result.stage1Evaluations.length; offset += 100) {
-    const rows = result.stage1Evaluations.slice(offset, offset + 100).map(({ raw, result: decision }) => ({
+  if (!runId) return { runId: null, savedCandidates: 0, savedCompetitors: 0 };
+
+  const rawKey = (source: string, sourceId: string) => `${source}\u0000${sourceId}`;
+  const rawByKey = new Map<string, Record<string, unknown>>();
+  for (const { raw, result: decision } of result.stage1Evaluations) {
+    rawByKey.set(rawKey(raw.source, raw.source_id), {
       ...raw,
       run_id: runId,
       status: decision.pass ? "llm1_passed" : "rejected",
       reject_reason: decision.pass ? null : decision.reject_reason ?? "기타",
-    }));
-    if (rows.length) await supabaseRest("raw_items?on_conflict=source,source_id", { method: "POST", headers: { Prefer: "resolution=ignore-duplicates" }, body: JSON.stringify(rows) });
+    });
   }
   for (const candidate of result.candidates) {
-    const insertedRawRows = await supabaseRest("raw_items?on_conflict=source,source_id", { method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" }, body: JSON.stringify({ ...candidate.raw, run_id: runId, status: "analyzed", reject_reason: null }) }) as Array<{ id: string }>;
-    let rawId: string | undefined = insertedRawRows?.[0]?.id;
-    if (!rawId) {
-      const existingRawRows = await supabaseRest(`raw_items?source=eq.${encodeURIComponent(candidate.raw.source)}&source_id=eq.${encodeURIComponent(candidate.raw.source_id)}&select=id&limit=1`) as Array<{ id: string }> | null;
-      rawId = existingRawRows?.[0]?.id;
-    }
-    if (!rawId) continue;
-    const existingPain = await supabaseRest(`pain_points?raw_item_id=eq.${encodeURIComponent(rawId)}&select=id&limit=1`) as Array<{ id: string }> | null;
-    if (existingPain?.length) continue;
-    const painBody: Record<string, unknown> = { raw_item_id: rawId, pain_summary: candidate.analysis.pain_summary, who: candidate.analysis.who, current_workaround: candidate.analysis.current_workaround, frequency: candidate.analysis.frequency, money_signal: candidate.analysis.money_signal, domain: candidate.analysis.domain, signal_type: "llm_pass" };
-    if (candidate.precisionVerified) painBody.precision_verified_at = new Date().toISOString();
-    const painRows = await supabaseRest("pain_points", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(painBody) }) as Array<{ id: string }>;
-    const painId = painRows?.[0]?.id; if (!painId) continue;
-    await supabaseRest("scores", { method: "POST", body: JSON.stringify({ pain_point_id: painId, f1: candidate.scores.f1, f2: null, f3: null, f4: candidate.scores.f4, f5: candidate.scores.f5, f6: candidate.scores.f6, data_access_stable: true, verdict: candidate.marketVerdict, verified: candidate.precisionVerified }) });
-    if (candidate.competitors.length) await supabaseRest("competitors", { method: "POST", body: JSON.stringify(candidate.competitors.map(c => ({ ...c, pain_point_id: painId }))) });
+    rawByKey.set(rawKey(candidate.raw.source, candidate.raw.source_id), {
+      ...candidate.raw,
+      run_id: runId,
+      status: "analyzed",
+      reject_reason: null,
+    });
   }
-  return runId;
+
+  const rawRows = [...rawByKey.values()];
+  const storedRawRows = rawRows.length
+    ? await supabaseRest("raw_items?on_conflict=source,source_id&select=id,source,source_id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify(rawRows),
+    }) as Array<{ id: string; source: string; source_id: string }> | null
+    : [];
+  const rawIdByKey = new Map((storedRawRows ?? []).map(row => [rawKey(row.source, row.source_id), row.id]));
+  const candidateByRawId = new Map<string, (typeof result.candidates)[number]>();
+  for (const candidate of result.candidates) {
+    const rawId = rawIdByKey.get(rawKey(candidate.raw.source, candidate.raw.source_id));
+    if (rawId) candidateByRawId.set(rawId, candidate);
+  }
+
+  const candidateRawIds = [...candidateByRawId.keys()];
+  const existingPainRows = candidateRawIds.length
+    ? await supabaseRest(`pain_points?raw_item_id=in.(${candidateRawIds.join(",")})&select=id,raw_item_id`) as Array<{ id: string; raw_item_id: string }> | null
+    : [];
+  const existingRawIds = new Set((existingPainRows ?? []).map(row => row.raw_item_id));
+  const verifiedAt = new Date().toISOString();
+  const painBodies = candidateRawIds
+    .filter(rawId => !existingRawIds.has(rawId))
+    .map(rawId => {
+      const candidate = candidateByRawId.get(rawId)!;
+      return {
+        raw_item_id: rawId,
+        pain_summary: candidate.analysis.pain_summary,
+        who: candidate.analysis.who,
+        current_workaround: candidate.analysis.current_workaround,
+        frequency: candidate.analysis.frequency,
+        money_signal: candidate.analysis.money_signal,
+        domain: candidate.analysis.domain,
+        signal_type: "llm_pass",
+        precision_verified_at: candidate.precisionVerified ? verifiedAt : null,
+      };
+    });
+  const painRows = painBodies.length
+    ? await supabaseRest("pain_points?on_conflict=raw_item_id&select=id,raw_item_id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify(painBodies),
+    }) as Array<{ id: string; raw_item_id: string }> | null
+    : [];
+
+  const painIdByRawId = new Map((painRows ?? []).map(row => [row.raw_item_id, row.id]));
+  const scoreRows = [...painIdByRawId.entries()].map(([rawId, painId]) => {
+    const candidate = candidateByRawId.get(rawId)!;
+    return {
+      pain_point_id: painId,
+      f1: candidate.scores.f1,
+      f2: null,
+      f3: null,
+      f4: candidate.scores.f4,
+      f5: candidate.scores.f5,
+      f6: candidate.scores.f6,
+      data_access_stable: true,
+      verdict: candidate.marketVerdict,
+      verified: candidate.precisionVerified,
+    };
+  });
+  if (scoreRows.length) {
+    await supabaseRest("scores?on_conflict=pain_point_id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify(scoreRows),
+    });
+  }
+
+  const competitorRows = [...painIdByRawId.entries()].flatMap(([rawId, painId]) => {
+    const candidate = candidateByRawId.get(rawId)!;
+    return candidate.competitors.map(competitor => ({ ...competitor, pain_point_id: painId }));
+  });
+  if (competitorRows.length) {
+    await supabaseRest("competitors", { method: "POST", body: JSON.stringify(competitorRows) });
+  }
+
+  return {
+    runId,
+    savedCandidates: painRows?.length ?? 0,
+    savedCompetitors: competitorRows.length,
+  };
 }

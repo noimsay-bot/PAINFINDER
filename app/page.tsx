@@ -483,11 +483,10 @@ function CandidateApproval({ items, selected, toggle, selectAll, onApprove, busy
 }
 
 function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
-  const [sources, setSources] = useState(["네이버카페", "지식iN", "블로그"]);
+  const [sources, setSources] = useState(["네이버카페", "지식iN"]);
   const [queries, setQueries] = useState<string[]>([]);
   const [queryInput, setQueryInput] = useState("");
   const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
   const [saved, setSaved] = useState(false);
   const [runMessage, setRunMessage] = useState("");
   const [autoVerifyTopN, setAutoVerifyTopN] = useState(10);
@@ -504,31 +503,61 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
     sources: Object.fromEntries(sources.map(source => [source, true])),
     period_days: 7,
     auto_verify_top_n: autoVerifyTopN,
-    limits: { queries: Math.min(Math.max(queries.length, 1), 20), itemsPerSource: 500, dailyCostUsd: 3 },
+    limits: { queries: Math.min(Math.max(queries.length, 1), 20), itemsPerSource: 50, dailyCostUsd: 3 },
   });
   const startRun = async () => {
-    if (!queries.length) { setRunMessage("검색어를 1개 이상 입력해 주세요."); setProgress(100); return; }
-    if (!sources.length) { setRunMessage("검색 소스를 1개 이상 선택해 주세요."); setProgress(100); return; }
-    setRunning(true); setProgress(8); setRunMessage("파이프라인을 시작하는 중");
-    const timer = window.setInterval(() => setProgress(p => Math.min(86, p + 5)), 450);
+    if (!queries.length) { setRunMessage("검색어를 1개 이상 입력해 주세요."); return; }
+    if (!sources.length) { setRunMessage("검색 소스를 1개 이상 선택해 주세요."); return; }
+    setRunning(true);
+    setRunMessage("");
     try {
       const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(configBody()) });
-      const result = await response.json() as { mode?: string; error?: string; stageCounts?: { collected?: number; llm2Analyzed?: number } };
-      if (!response.ok) throw new Error(result.error ?? "실행 실패");
-      setProgress(100);
-      setRunMessage(result.mode === "demo" ? "데모 실행 완료 · API 키 연결 시 실수집 시작" : `실행 완료 · ${result.stageCounts?.collected ?? 0}건 수집 / ${result.stageCounts?.llm2Analyzed ?? 0}건 분석`);
+      if (!response.ok) {
+        const contentType = response.headers.get("content-type") ?? "";
+        const detail = contentType.includes("application/json")
+          ? ((await response.json().catch(() => ({}))) as { error?: string }).error ?? "알 수 없는 오류"
+          : (await response.text()) || "알 수 없는 오류";
+        setRunMessage(response.status === 504
+          ? "실행이 시간 제한을 초과했습니다. 검색어 수나 수집량을 줄여 다시 시도해 주세요. 이미 저장된 후보는 목록에 반영되어 있습니다."
+          : detail);
+        await onRunComplete();
+        return;
+      }
+      const result = await response.json() as {
+        mode?: string;
+        stoppedReason?: string | null;
+        savedCandidates?: number;
+        requestedQueryCount?: number;
+        executedQueryCount?: number;
+        stageCounts?: { collected?: number; llm2Analyzed?: number };
+      };
+      const querySummary = (result.requestedQueryCount ?? 0) > (result.executedQueryCount ?? 0)
+        ? ` · 검색어 ${result.executedQueryCount}/${result.requestedQueryCount}개 실행`
+        : "";
+      const completion = result.stoppedReason === "time_budget" ? "시간 예산 내 부분 완료" : "실행 완료";
+      setRunMessage(result.mode === "demo"
+        ? "데모 실행 완료 · API 키 연결 시 실수집 시작"
+        : `${completion} · ${result.stageCounts?.collected ?? 0}건 수집 / 신규 후보 ${result.savedCandidates ?? 0}건${querySummary}`);
       await onRunComplete();
     } catch (error) { setRunMessage(error instanceof Error ? error.message : "실행 실패"); }
-    finally { window.clearInterval(timer); setRunning(false); }
+    finally { setRunning(false); }
   };
   const saveConfig = async () => {
-    if (!queries.length) { setRunMessage("검색어를 1개 이상 입력해 주세요."); setProgress(100); return; }
-    if (!sources.length) { setRunMessage("검색 소스를 1개 이상 선택해 주세요."); setProgress(100); return; }
+    if (!queries.length) { setRunMessage("검색어를 1개 이상 입력해 주세요."); return; }
+    if (!sources.length) { setRunMessage("검색 소스를 1개 이상 선택해 주세요."); return; }
     setSaved(false);
     try { await fetch("/api/configs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(configBody()) }); setSaved(true); }
     finally { window.setTimeout(() => setSaved(false), 1500); }
   };
-  const toggleSource = (source: string) => setSources(s => s.includes(source) ? s.filter(x => x !== source) : [...s, source]);
+  const toggleSource = (source: string) => setSources(current => {
+    if (current.includes(source)) return current.filter(value => value !== source);
+    if (current.length >= 2) {
+      setRunMessage("수동 실행은 검색 소스를 최대 2개까지 선택할 수 있습니다.");
+      return current;
+    }
+    setRunMessage("");
+    return [...current, source];
+  });
   const addQueries = () => {
     const additions = queryInput.split(/[,\n]/).map(value => value.trim()).filter(Boolean);
     if (!additions.length) return;
@@ -537,10 +566,10 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
   };
   return <div className="settings-wrap">
     <div className="settings-grid">
-      <section className="setting-card search-card query-card"><header><span>01</span><div><h2>검색어</h2><p>입력한 문구를 조합하거나 바꾸지 않고 그대로 검색합니다.</p></div><small>{queries.length} / 20</small></header><label className="field-label">직접 검색어</label><div className="query-entry"><input value={queryInput} onChange={e => setQueryInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addQueries(); } }} placeholder="검색어 입력 후 Enter · 쉼표로 여러 개 추가" /><button onClick={addQueries}>추가</button></div><div className="query-tags">{queries.map((query, index) => <span key={query}><b>{String(index + 1).padStart(2, "0")}</b>{query}<button onClick={() => setQueries(current => current.filter(value => value !== query))} aria-label={`${query} 삭제`}>×</button></span>)}{!queries.length && <p>등록된 검색어가 없습니다. 검색할 문구를 직접 입력해 주세요.</p>}</div><label className="field-label">검색 소스</label><div className="source-options">{["네이버카페", "지식iN", "블로그", "웹문서", "Threads", "HN"].map(s => <button key={s} className={sources.includes(s) ? "on" : ""} onClick={() => toggleSource(s)}><i />{s}{s === "Threads" && <em>승인 필요</em>}</button>)}</div><p className="query-note">등록한 검색어를 선택한 각 소스에 한 번씩 그대로 요청합니다.</p></section>
-      <section className="setting-card limit-card"><header><span>02</span><div><h2>하드 상한</h2><p>예상 밖의 폭주를 코드와 설정에서 이중 차단합니다.</p></div></header><div className="limit-grid"><label>이번 실행 검색어<div><input type="number" value={queries.length} readOnly /><span>최대 20</span></div></label><label>소스별 수집 상한<div><input type="number" defaultValue="500" /><span>건</span></div></label><label>자동 정밀 검증<div><input type="number" min="0" max="40" value={autoVerifyTopN} onChange={event => setAutoVerifyTopN(Math.min(40, Math.max(0, Number(event.target.value) || 0)))} /><span>상위 N건</span></div></label><label>일일 비용 상한<div><b>$</b><input type="number" defaultValue="3" /><span>최대 $10</span></div></label></div><p className="limit-note"><span>!</span> 자동 정밀 검증을 0으로 두면 후보는 미검증으로 남고, 상세 화면의 V 버튼으로 개별 실행할 수 있습니다.</p></section>
+      <section className="setting-card search-card query-card"><header><span>01</span><div><h2>검색어</h2><p>입력한 문구를 조합하거나 바꾸지 않고 그대로 검색합니다.</p></div><small>{queries.length} / 20</small></header><label className="field-label">직접 검색어</label><div className="query-entry"><input value={queryInput} onChange={e => setQueryInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addQueries(); } }} placeholder="검색어 입력 후 Enter · 쉼표로 여러 개 추가" /><button onClick={addQueries}>추가</button></div><div className="query-tags">{queries.map((query, index) => <span key={query}><b>{String(index + 1).padStart(2, "0")}</b>{query}<button onClick={() => setQueries(current => current.filter(value => value !== query))} aria-label={`${query} 삭제`}>×</button></span>)}{!queries.length && <p>등록된 검색어가 없습니다. 검색할 문구를 직접 입력해 주세요.</p>}</div>{queries.length > 5 && <p className="manual-limit-alert">검색어 {queries.length}개를 모두 저장하고, 이번 실행에서는 앞의 5개만 처리합니다.</p>}<label className="field-label">검색 소스</label><div className="source-options">{["네이버카페", "지식iN", "블로그", "웹문서", "Threads", "HN"].map(s => <button key={s} className={sources.includes(s) ? "on" : ""} onClick={() => toggleSource(s)}><i />{s}{s === "Threads" && <em>승인 필요</em>}</button>)}</div><p className="query-note">수동 실행은 최대 5개 검색어·소스 2개·소스당 50건입니다. 나머지 검색어는 저장되어 매일 새벽 자동 실행에서 처리됩니다.</p></section>
+      <section className="setting-card limit-card"><header><span>02</span><div><h2>수동 실행 상한</h2><p>300초 안에 안정적으로 끝나는 규모로 제한합니다.</p></div></header><div className="limit-grid"><label>이번 실행 검색어<div><input type="number" value={Math.min(queries.length, 5)} readOnly /><span>최대 5</span></div></label><label>소스별 수집 상한<div><input type="number" value="50" readOnly /><span>건</span></div></label><label>자동 정밀 검증<div><input type="number" min="0" max="10" value={autoVerifyTopN} onChange={event => setAutoVerifyTopN(Math.min(10, Math.max(0, Number(event.target.value) || 0)))} /><span>상위 N건</span></div></label><label>일일 비용 상한<div><b>$</b><input type="number" defaultValue="3" /><span>최대 $10</span></div></label></div><p className="limit-note"><span>!</span> 자동 정밀 검증을 0으로 두면 후보는 미검증으로 남고, 상세 화면의 V 버튼으로 개별 실행할 수 있습니다.</p></section>
     </div>
-    <div className="settings-footer"><div>{progress > 0 && <><span>{running ? `파이프라인 실행 중 · ${progress}%` : runMessage}</span><div className="run-progress"><i style={{ width: `${progress}%` }} /></div></>}</div><button className="secondary" onClick={saveConfig}>{saved ? "✓ 저장됨" : "설정 저장"}</button><button className="primary" onClick={startRun} disabled={running}>{running ? `${progress}% 처리 중` : "▶ 지금 실행"}</button></div>
+    <div className="settings-footer"><div>{(running || runMessage) && <span className={running ? "run-waiting" : ""}>{running && <i className="verify-spinner" />} {running ? `실행 중… (검색어 ${Math.min(queries.length, 5)}개, 최대 수 분 소요)` : runMessage}</span>}</div><button className="secondary" onClick={saveConfig}>{saved ? "✓ 저장됨" : "설정 저장"}</button><button className="primary" onClick={startRun} disabled={running}>{running ? "실행 중…" : "▶ 지금 실행"}</button></div>
   </div>;
 }
 

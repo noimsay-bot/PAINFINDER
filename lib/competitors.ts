@@ -41,6 +41,18 @@ export type ProductCompetitor = {
   source: CompetitorSource;
 };
 export type VerificationCounts = { urlExcluded: number; product: number; content: number; irrelevant: number; appProduct: number };
+type AppMarketResult = {
+  products: ProductCompetitor[];
+  verdict: MarketVerdict;
+  queries: string[];
+  counts: { appProduct: number };
+  errors: string[];
+};
+
+export type AppMarketSearchContext = {
+  termCache: Map<string, Promise<ProductCompetitor[]>>;
+  schedule: <T>(task: () => Promise<T>) => Promise<T>;
+};
 
 function hostnameMatches(hostname: string, blocked: string) {
   const host = hostname.replace(/^www\./, "");
@@ -133,41 +145,69 @@ export function buildPrecisionSearchTerms(domain: string) {
   return [`${core} 프로그램`, `${core} 솔루션`, `${core} 관리 시스템`];
 }
 
-export async function searchAppMarket(domain: string) {
+export function createAppMarketSearchContext(intervalMs = 200): AppMarketSearchContext {
+  let tail: Promise<void> = Promise.resolve();
+  let lastStartedAt = 0;
+  return {
+    termCache: new Map(),
+    schedule<T>(task: () => Promise<T>) {
+      const scheduled = tail.then(async () => {
+        const waitMs = Math.max(0, intervalMs - (Date.now() - lastStartedAt));
+        if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
+        lastStartedAt = Date.now();
+        return task();
+      });
+      tail = scheduled.then(() => undefined, () => undefined);
+      return scheduled;
+    },
+  };
+}
+
+async function searchItunesTerm(term: string, context: AppMarketSearchContext) {
+  const cached = context.termCache.get(term);
+  if (cached) return cached;
+
+  const request = context.schedule(async () => {
+    const url = new URL("https://itunes.apple.com/search");
+    url.searchParams.set("term", term);
+    url.searchParams.set("country", "kr");
+    url.searchParams.set("entity", "software");
+    url.searchParams.set("limit", "10");
+    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (response.status === 429) throw new Error("iTunes 429");
+    if (!response.ok) throw new Error(`iTunes ${response.status}`);
+    const payload = await response.json() as { results?: Array<Record<string, unknown>> };
+    return (payload.results ?? []).flatMap((app): ProductCompetitor[] => {
+      const appUrl = String(app.trackViewUrl ?? "");
+      if (!appUrl) return [];
+      const formattedPrice = String(app.formattedPrice ?? "").trim();
+      const pricing: CompetitorPricing = /^(무료|free)$/i.test(formattedPrice) ? "free" : formattedPrice ? "paid" : "unknown";
+      const details = ["App Store", String(app.primaryGenreName ?? "").trim(), formattedPrice, app.averageUserRating ? `평점 ${Number(app.averageUserRating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
+      return [{
+        name: String(app.trackName ?? "앱 이름 미상"),
+        url: appUrl,
+        pricing,
+        quality_note: details,
+        last_updated_signal: String(app.currentVersionReleaseDate ?? "") || null,
+        seller_name: String(app.sellerName ?? "") || null,
+        source: "appstore",
+      }];
+    });
+  });
+  context.termCache.set(term, request);
+  return request;
+}
+
+export async function searchAppMarket(
+  domain: string,
+  context = createAppMarketSearchContext(),
+): Promise<AppMarketResult> {
   const errors: string[] = [];
   const products: ProductCompetitor[] = [];
   const queries = buildAppSearchTerms(domain);
   for (const term of queries) {
     try {
-      const url = new URL("https://itunes.apple.com/search");
-      url.searchParams.set("term", term);
-      url.searchParams.set("country", "kr");
-      url.searchParams.set("entity", "software");
-      url.searchParams.set("limit", "10");
-      let response = await fetch(url);
-      if (response.status === 429) {
-        const retryAfterSeconds = Math.min(Number(response.headers.get("retry-after") ?? 1) || 1, 3);
-        await new Promise(resolve => setTimeout(resolve, retryAfterSeconds * 1000));
-        response = await fetch(url);
-      }
-      if (!response.ok) throw new Error(`iTunes ${response.status}`);
-      const payload = await response.json() as { results?: Array<Record<string, unknown>> };
-      for (const app of payload.results ?? []) {
-        const appUrl = String(app.trackViewUrl ?? "");
-        if (!appUrl) continue;
-        const formattedPrice = String(app.formattedPrice ?? "").trim();
-        const pricing: CompetitorPricing = /^(무료|free)$/i.test(formattedPrice) ? "free" : formattedPrice ? "paid" : "unknown";
-        const details = ["App Store", String(app.primaryGenreName ?? "").trim(), formattedPrice, app.averageUserRating ? `평점 ${Number(app.averageUserRating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
-        products.push({
-          name: String(app.trackName ?? "앱 이름 미상"),
-          url: appUrl,
-          pricing,
-          quality_note: details,
-          last_updated_signal: String(app.currentVersionReleaseDate ?? "") || null,
-          seller_name: String(app.sellerName ?? "") || null,
-          source: "appstore",
-        });
-      }
+      products.push(...await searchItunesTerm(term, context));
     } catch (error) { errors.push(`itunes:${term}:${error instanceof Error ? error.message : "failed"}`); }
   }
   const unique = mergeProducts(products);

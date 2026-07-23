@@ -26,16 +26,19 @@ test("Painfinder 제품 화면과 검색어 발굴 메뉴를 서버 렌더링한
 });
 
 test("미검증 표시와 승인형 검색어 발굴 경로를 코드에 고정한다", async () => {
-  const [page, dashboard, scoring, discovery, schema] = await Promise.all([
+  const [page, dashboard, scoring, discovery, schema, pipeline, runRoute] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/scoring.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/discovery/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8"),
+    readFile(new URL("../lib/pipeline.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/run/route.ts", import.meta.url), "utf8"),
   ]);
   assert.match(page, /unverified:\s*"미검증"/);
   assert.match(page, /인컴번트 미포함/);
   assert.match(dashboard, /precisionVerified \? marketVerdict\(score\.verdict\) : "unverified"/);
+  assert.match(dashboard, /row\.stopped_reason \? "stopped" : "completed"/);
   assert.match(scoring, /f4:\s*number \| null/);
   assert.match(discovery, /body\.action === "approve"/);
   assert.match(discovery, /body\.action === "mine-text"/);
@@ -45,4 +48,10 @@ test("미검증 표시와 승인형 검색어 발굴 경로를 코드에 고정�
   assert.match(schema, /create table if not exists industry_seeds/);
   assert.match(schema, /create table if not exists cafe_names/);
   assert.match(schema, /create table if not exists query_discoveries/);
+  assert.doesNotMatch(page, /Math\.min\(86/);
+  assert.match(page, /response\.headers\.get\("content-type"\)/);
+  assert.match(page, /response\.status === 504/);
+  assert.match(pipeline, /resolution=merge-duplicates,return=representation/);
+  assert.match(pipeline, /stoppedReason \?\?= "time_budget"/);
+  assert.match(runRoute, /MANUAL_RUN_LIMITS\.LLM1_MAX_CALLS/);
 });
