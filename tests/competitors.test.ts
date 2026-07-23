@@ -32,11 +32,13 @@ test("URL 필터는 후보와 제외 개수를 분리한다", () => {
   assert.equal(result.candidates[0]?.url, "https://service.example.com/");
 });
 
-test("시장 판정은 개수가 아니라 가격 성격을 따른다", () => {
+test("시장 판정은 가격 성격과 5개 이상 포화 임계값을 함께 따른다", () => {
   assert.equal(classifyMarket([]), "empty");
   assert.equal(classifyMarket([product("free")]), "all_free");
   assert.equal(classifyMarket([product("public")]), "public_owned");
   assert.equal(classifyMarket([product("paid")]), "paid_exists");
+  assert.equal(classifyMarket([product("paid"), product("free", 1), product("free", 2), product("free", 3)]), "paid_exists");
+  assert.equal(classifyMarket([product("paid"), product("free", 1), product("free", 2), product("free", 3), product("free", 4)]), "crowded");
   assert.equal(classifyMarket(Array.from({ length: 5 }, (_, index) => product("freemium", index))), "crowded");
   assert.equal(scoreMarket("paid_exists"), 3);
   assert.equal(scoreMarket("empty"), 2);

@@ -55,3 +55,24 @@ test("미검증 표시와 승인형 검색어 발굴 경로를 코드에 고정�
   assert.match(pipeline, /stoppedReason \?\?= "time_budget"/);
   assert.match(runRoute, /MANUAL_RUN_LIMITS\.LLM1_MAX_CALLS/);
 });
+
+test("시장 포화 교정과 승인형 거부 학습 경로를 코드에 고정한다", async () => {
+  const [page, dashboard, decisions, learning, competitors, ruleFilter, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/decisions/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/learning/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/competitors.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/rule-filter.ts", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260723_scoring_rule_learning.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(competitors, /paidCount >= 5 \|\| products\.length >= 5/);
+  assert.match(page, /crowded:\s*"붐빔"/);
+  assert.match(dashboard, /\.filter\(candidate => !candidate\.ruleRejected\)/);
+  assert.match(decisions, /reason_category:\s*reasonCategory/);
+  assert.match(learning, /evidence_count=gte\.\$\{LEARNING_MIN_EVIDENCE\}/);
+  assert.match(learning, /rule_exclusions\?on_conflict=kind,value/);
+  assert.match(ruleFilter, /classifyFinalRuleRejection/);
+  assert.match(migration, /alter table learning_suggestions enable row level security/);
+  assert.match(migration, /when paid_count >= 5 or product_count >= 5 then 'crowded'/);
+});

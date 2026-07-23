@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseRest } from "@/lib/pipeline";
 import type { MarketVerdict } from "@/lib/competitors";
+import { REJECTION_REASON_LABELS, type RejectionReasonCategory } from "@/lib/learning";
 
 type Row = Record<string, unknown>;
 
@@ -35,7 +36,7 @@ function marketVerdict(value: unknown): MarketVerdict {
 export async function GET() {
   try {
     const [painRows, logRows] = await Promise.all([
-      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,reject_reason),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,decided_at)&order=created_at.desc&limit=200"),
+      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
       supabaseRest("run_logs?select=id,started_at,ended_at,stage_counts,llm_calls,cost_estimate,stopped_reason,errors,run_configs(name)&order=started_at.desc&limit=50"),
     ]) as [Row[] | null, Row[] | null];
 
@@ -59,6 +60,9 @@ export async function GET() {
       const precisionVerified = Boolean(row.precision_verified_at);
       const incumbentScore = score.f4 === null || score.f4 === undefined ? null : Number(score.f4);
       const storedTotal = Number(score.total ?? 0);
+      const reasonCategory = String(latest.reason_category ?? "") as RejectionReasonCategory;
+      const reasonLabel = REJECTION_REASON_LABELS[reasonCategory] ?? String(latest.reason ?? "");
+      const reasonNote = String(latest.reason_note ?? "").trim();
       return {
         id: String(row.id),
         summary: String(row.pain_summary ?? "요약 없음"),
@@ -69,11 +73,13 @@ export async function GET() {
         score: precisionVerified ? storedTotal : Math.max(0, storedTotal - (incumbentScore ?? 0)),
         scoreMax: precisionVerified ? (legacyScore ? 12 : 10) : (legacyScore ? 9 : 7),
         competitors: rivals.length,
+        paidCompetitors: rivals.filter(rival => rival.pricing === "paid" || rival.pricing === "freemium").length,
         marketVerdict: precisionVerified ? marketVerdict(score.verdict) : "unverified",
         precisionVerified,
         precisionVerifiedAt: row.precision_verified_at ? String(row.precision_verified_at) : null,
         decision: String(latest.action ?? "unreviewed"),
-        decisionReason: latest.reason ? String(latest.reason) : null,
+        decisionReason: reasonLabel ? `${reasonLabel}${reasonNote ? ` · ${reasonNote}` : ""}` : null,
+        decisionReasonCategory: reasonCategory || null,
         decidedAt: latest.decided_at ? String(latest.decided_at) : null,
         domain: String(row.domain ?? "미분류"),
         frequency: ({ daily: "매일", weekly: "매주", monthly: "매월", occasional: "비정기" } as Record<string, string>)[String(row.frequency)] ?? "빈도 미상",
@@ -91,9 +97,12 @@ export async function GET() {
         ],
         rivals,
         url: String(raw.url ?? ""),
+        origin: String(raw.query_origin ?? "unknown"),
+        ruleRejected: Boolean(raw.reject_reason) || String(raw.status ?? "") === "rule_rejected",
         createdAt: String(row.created_at ?? ""),
       };
-    }).sort((a, b) => Number(b.precisionVerified) - Number(a.precisionVerified) || b.score - a.score || b.createdAt.localeCompare(a.createdAt));
+    }).filter(candidate => !candidate.ruleRejected)
+      .sort((a, b) => Number(b.precisionVerified) - Number(a.precisionVerified) || b.score - a.score || b.createdAt.localeCompare(a.createdAt));
 
     const logs = (logRows ?? []).map((row) => ({
       id: String(row.id),

@@ -53,6 +53,8 @@ create table if not exists raw_items (
   collected_at timestamptz not null default now(),
   status text not null default 'collected',
   reject_reason text,
+  query_text text,
+  query_origin text,
   run_id uuid references run_logs(id) on delete set null,
   unique(source, source_id)
 );
@@ -137,13 +139,42 @@ create table if not exists decisions (
   pain_point_id uuid not null references pain_points(id) on delete cascade,
   action text not null check (action in ('tracking','holding','rejected','unreviewed')),
   reason text,
+  reason_category text,
+  reason_note text,
   decided_at timestamptz not null default now()
 );
+
+create table if not exists learning_suggestions (
+  id bigint generated always as identity primary key,
+  suggestion_type text not null check (suggestion_type in ('keyword','domain','prompt_example')),
+  value text not null,
+  source_pain_point_id uuid references pain_points(id) on delete set null,
+  evidence_count integer not null default 1 check (evidence_count >= 1),
+  status text not null default 'pending' check (status in ('pending','approved','dismissed')),
+  created_at timestamptz not null default now(),
+  reviewed_at timestamptz,
+  unique(suggestion_type, value)
+);
+
+create table if not exists rule_exclusions (
+  id bigint generated always as identity primary key,
+  kind text not null check (kind in ('keyword','domain')),
+  value text not null,
+  source text not null default 'decision_learning',
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique(kind, value)
+);
+
+alter table learning_suggestions enable row level security;
+alter table rule_exclusions enable row level security;
 
 create index if not exists pain_points_cluster_idx on pain_points(cluster_id);
 create index if not exists pain_points_recurrence_idx on pain_points(recurrence_count desc);
 create index if not exists raw_items_collected_idx on raw_items(collected_at desc);
 create index if not exists decisions_pain_point_idx on decisions(pain_point_id, decided_at desc);
+create index if not exists learning_suggestions_status_idx on learning_suggestions(status, evidence_count desc, created_at desc);
+create index if not exists rule_exclusions_active_idx on rule_exclusions(active, kind, created_at desc);
 create index if not exists query_discoveries_pending_idx on query_discoveries(origin, approved_at, frequency desc);
 create index if not exists industry_seeds_round_robin_idx on industry_seeds(done, created_at, id);
 create index if not exists industry_seeds_active_section_idx on industry_seeds(active, section, done, ksic_code);

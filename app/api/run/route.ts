@@ -13,7 +13,7 @@ export async function POST(request: Request) {
     const config = await request.json().catch(() => ({})) as RunConfig;
     const resolved = await resolveManualQueries(config);
     const limited = applyManualRunLimits(config, resolved.executed);
-    const result = await runPipeline(limited.config, {
+    const result = await runPipeline({ ...limited.config, query_origins: resolved.origins }, {
       deadlineAt: requestStartedAt + RUN_TIME_BUDGET.DEADLINE_MS,
       llm1MaxCalls: MANUAL_RUN_LIMITS.LLM1_MAX_CALLS,
       llm2MaxCalls: MANUAL_RUN_LIMITS.LLM2_MAX_CALLS,

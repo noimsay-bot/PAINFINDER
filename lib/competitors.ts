@@ -118,10 +118,17 @@ export function mergeProducts(...groups: ProductCompetitor[][]) {
 export function classifyMarket(products: ProductCompetitor[]): MarketVerdict {
   if (!products.length) return "empty";
   if (products.some(product => product.pricing === "public")) return "public_owned";
+  if (products.every(product => product.pricing === "free")) return "all_free";
   const paidCount = products.filter(product => product.pricing === "paid" || product.pricing === "freemium").length;
-  if (paidCount >= 5) return "crowded";
+  // A mixed market with five or more identified products is already saturated,
+  // even when app-store pricing metadata marks many competitors as free.
+  if (paidCount >= 5 || products.length >= 5) return "crowded";
   if (paidCount >= 1) return "paid_exists";
-  return "all_free";
+  return "empty";
+}
+
+export function paidCompetitorCount(products: ProductCompetitor[]) {
+  return products.filter(product => product.pricing === "paid" || product.pricing === "freemium").length;
 }
 
 export function scoreMarket(verdict: MarketVerdict) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { REJECTION_REASON_LABELS, type RejectionReasonCategory } from "@/lib/learning";
 
 type View = "today" | "signals" | "discovery" | "settings" | "archive" | "logs";
 type Decision = "unreviewed" | "tracking" | "holding" | "rejected";
@@ -17,6 +18,7 @@ type Candidate = {
   score: number;
   scoreMax: number;
   competitors: number;
+  paidCompetitors: number;
   marketVerdict: MarketVerdict;
   precisionVerified: boolean;
   precisionVerifiedAt: string | null;
@@ -34,6 +36,8 @@ type Candidate = {
   url: string;
   decisionReason?: string | null;
   decidedAt?: string | null;
+  decisionReasonCategory?: string | null;
+  origin?: string;
 };
 
 type RunLog = {
@@ -66,9 +70,10 @@ const MARKET_LABEL: Record<MarketVerdict, string> = {
   unverified: "미검증", paid_exists: "유료 존재", crowded: "붐빔", all_free: "전부 무료", public_owned: "공공 제공", empty: "경쟁자 없음",
 };
 
-function marketLabel(item: Pick<Candidate, "marketVerdict" | "competitors">) {
+function marketLabel(item: Pick<Candidate, "marketVerdict" | "competitors" | "paidCompetitors">) {
   const withCount = ["paid_exists", "crowded", "all_free"].includes(item.marketVerdict);
-  return `${MARKET_LABEL[item.marketVerdict]}${withCount ? ` (${item.competitors})` : ""}`;
+  const count = item.marketVerdict === "paid_exists" ? item.paidCompetitors : item.competitors;
+  return `${MARKET_LABEL[item.marketVerdict]}${withCount ? ` (${count})` : ""}`;
 }
 
 const PRICING_LABEL: Record<CompetitorPricing, string> = {
@@ -172,7 +177,8 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("전체 소스");
   const [rejecting, setRejecting] = useState(false);
-  const [rejectReason, setRejectReason] = useState("");
+  const [rejectCategory, setRejectCategory] = useState<RejectionReasonCategory | "">("");
+  const [rejectNote, setRejectNote] = useState("");
   const [loading, setLoading] = useState(true);
   const [dataError, setDataError] = useState("");
   const [setupRequired, setSetupRequired] = useState(false);
@@ -213,12 +219,28 @@ export default function Home() {
     finally { setVerifyingId(""); }
   }, [loadDashboard, verifyingId]);
 
-  const decide = useCallback((decision: Decision) => {
+  const decide = useCallback(async (decision: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => {
     if (!selectedId) return;
-    setItems(prev => prev.map(item => item.id === selectedId ? { ...item, decision } : item));
-    void fetch("/api/decisions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ painPointId: selectedId, action: decision, reason: decision === "rejected" ? rejectReason : null }) });
-    setRejecting(false); setRejectReason("");
-  }, [rejectReason, selectedId]);
+    try {
+      const response = await fetch("/api/decisions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ painPointId: selectedId, action: decision, reasonCategory, reasonNote }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "판정을 저장하지 못했습니다.");
+      const reasonLabel = reasonCategory ? REJECTION_REASON_LABELS[reasonCategory] : null;
+      setItems(prev => prev.map(item => item.id === selectedId ? {
+        ...item,
+        decision,
+        decisionReason: reasonLabel ? `${reasonLabel}${reasonNote?.trim() ? ` · ${reasonNote.trim()}` : ""}` : null,
+        decisionReasonCategory: reasonCategory ?? null,
+      } : item));
+      setRejecting(false); setRejectCategory(""); setRejectNote("");
+    } catch (error) {
+      setDataError(error instanceof Error ? error.message : "판정을 저장하지 못했습니다.");
+    }
+  }, [selectedId]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -226,8 +248,8 @@ export default function Home() {
       const index = visible.findIndex(i => i.id === selectedId);
       if (event.key.toLowerCase() === "j") setSelectedId(visible[Math.min(index + 1, visible.length - 1)]?.id ?? selectedId);
       if (event.key.toLowerCase() === "k") setSelectedId(visible[Math.max(index - 1, 0)]?.id ?? selectedId);
-      if (event.key.toLowerCase() === "t") decide("tracking");
-      if (event.key.toLowerCase() === "h") decide("holding");
+      if (event.key.toLowerCase() === "t") void decide("tracking");
+      if (event.key.toLowerCase() === "h") void decide("holding");
       if (event.key.toLowerCase() === "x") setRejecting(true);
       if (event.key.toLowerCase() === "v" && selected?.id) void verifyCandidate(selected.id);
       if (event.key === "Enter" && selected?.url) window.open(selected.url, "_blank", "noopener,noreferrer");
@@ -262,7 +284,7 @@ export default function Home() {
 
       <section className="workspace">
         <Topbar title={titles[view][0]} subtitle={titles[view][1]} dark={dark} setDark={setDark} />
-        {view === "today" && (selected ? <TodayView allItems={items} visible={visible} selected={selected} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectReason={rejectReason} setRejectReason={setRejectReason} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
+        {view === "today" && (selected ? <TodayView allItems={items} visible={visible} selected={selected} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
         {view === "signals" && <SignalsView items={items} onOpen={(id) => { setSelectedId(id); setView("today"); }} />}
         {view === "discovery" && <DiscoveryView />}
         {view === "settings" && <SettingsView onRunComplete={loadDashboard} />}
@@ -275,8 +297,8 @@ export default function Home() {
   );
 }
 
-function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, onDecision, onVerify, verifyingId, rejecting, setRejecting, rejectReason, setRejectReason }: {
-  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; onDecision: (d: Decision) => void; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectReason: string; setRejectReason: (v: string) => void;
+function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, onDecision, onVerify, verifyingId, rejecting, setRejecting, rejectCategory, setRejectCategory, rejectNote, setRejectNote }: {
+  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; onDecision: (d: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => Promise<void>; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectCategory: RejectionReasonCategory | ""; setRejectCategory: (v: RejectionReasonCategory | "") => void; rejectNote: string; setRejectNote: (v: string) => void;
 }) {
   const rejected = allItems.filter(item => item.decision === "rejected").length;
   return <div className="today-layout">
@@ -317,7 +339,12 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
         <section className="detail-section scorecard"><header><h3>4개 필터</h3><span>{selected.score} / {selected.scoreMax}점{selected.precisionVerified ? (selected.scoreMax === 12 ? " · 기존 기록" : "") : " · 인컴번트 미포함"}</span></header><div className="score-grid">{selected.scores.map(s => <div key={s.label} className={s.value === null ? "score-unverified" : ""}><span>{s.label}</span><div className="score-track"><i style={{ width: `${s.value === null ? 0 : s.max ? s.value / s.max * 100 : 0}%` }} /></div><b>{s.value === null ? "—" : s.value}</b></div>)}</div><div className={`access-flag ${selected.access ? "stable" : "unstable"}`}><span>{selected.access ? "✓" : "!"}</span><div><strong>데이터 접근 {selected.access ? "안정" : "불안정"}</strong><small>{selected.access ? "공식 API 또는 공개 데이터 확인" : "공식 API가 없어 별도 검토 필요"}</small></div></div></section>
       </div>
       <div className="decision-bar">
-        {rejecting ? <div className="reject-form"><input autoFocus value={rejectReason} onChange={e => setRejectReason(e.target.value)} placeholder="기각 사유를 입력하세요" /><button onClick={() => onDecision("rejected")} disabled={!rejectReason.trim()}>기각 확정</button><button onClick={() => setRejecting(false)}>취소</button></div> : <><button className="track" onClick={() => onDecision("tracking")}><kbd>T</kbd> 추적</button><button onClick={() => onDecision("holding")}><kbd>H</kbd> 보류</button><button className="reject" onClick={() => setRejecting(true)}><kbd>X</kbd> 기각</button></>}
+        {rejecting ? <div className="reject-form">
+          <strong>기각 사유</strong>
+          <div className="reject-reasons">{Object.entries(REJECTION_REASON_LABELS).map(([value, label]) => <label key={value} className={rejectCategory === value ? "selected" : ""}><input type="radio" name="reject-category" value={value} checked={rejectCategory === value} onChange={() => setRejectCategory(value as RejectionReasonCategory)} /><span>{label}{value === "not_pain" && <small>구직·구매·신체·일회성·정보질문</small>}</span></label>)}</div>
+          <textarea value={rejectNote} onChange={event => setRejectNote(event.target.value)} placeholder={rejectCategory === "other" ? "기타 사유를 입력하세요" : "자유 메모 (선택)"} />
+          <div><button className="confirm-reject" onClick={() => void onDecision("rejected", rejectCategory || undefined, rejectNote)} disabled={!rejectCategory || (rejectCategory === "other" && !rejectNote.trim())}>기각 확정</button><button onClick={() => { setRejecting(false); setRejectCategory(""); setRejectNote(""); }}>취소</button></div>
+        </div> : <><button className="track" onClick={() => void onDecision("tracking")}><kbd>T</kbd> 추적</button><button onClick={() => void onDecision("holding")}><kbd>H</kbd> 보류</button><button className="reject" onClick={() => setRejecting(true)}><kbd>X</kbd> 기각</button></>}
       </div>
     </aside>
   </div>;
@@ -337,6 +364,20 @@ type CafeStat = { cafeId: string; cafeName: string | null; collected: number; pa
 type IndustryTranslation = { roles?: string[]; tools?: string[]; tasks?: string[] };
 type IndustrySeed = { id: number; ksic_code: string; ksic_name: string; section: string | null; active: boolean; note: string | null; done: boolean; translation: IndustryTranslation | null; translated_at: string | null };
 type DiscoveryData = { cafes: CafeStat[]; insufficientCafes: CafeStat[]; discoveries: DiscoveryItem[]; industries: IndustrySeed[]; seeds: Array<{ id: number; query_text: string; origin: string; active: boolean; last_used_at: string | null }>; error?: string };
+type LearningSuggestion = { id: number; suggestion_type: "keyword" | "domain" | "prompt_example"; value: string; evidence_count: number; status: "pending" | "approved" | "dismissed"; created_at: string };
+type LearningData = {
+  minEvidence: number;
+  suggestions: LearningSuggestion[];
+  exclusions: Array<{ id: number; kind: "keyword" | "domain"; value: string; created_at: string; active: boolean }>;
+  stats: {
+    decisionCounts: { tracking?: number; holding?: number; rejected?: number };
+    reasonDistribution: Array<{ label: string; count: number }>;
+    originStats: Array<{ origin: string; decided: number; tracking: number; trackingRate: number }>;
+    trackingProfile: { topDomain: { label: string; count: number } | null; topVerdict: { label: string; count: number } | null; topScoreBand: { label: string; count: number } | null };
+    promptExampleCount: number;
+  };
+  error?: string;
+};
 
 const DISCOVERY_CATEGORY: Record<string, string> = {
   cafe_focus: "집중 수집어", tools: "도구", tasks: "업무", jargon: "현업 표현", roles: "직군",
@@ -349,7 +390,7 @@ const KSIC_SECTION_LABELS: Record<string, string> = {
 };
 
 function DiscoveryView() {
-  const [tab, setTab] = useState<"cafe" | "text_mining" | "industry">("cafe");
+  const [tab, setTab] = useState<"cafe" | "text_mining" | "industry" | "learning">("cafe");
   const [data, setData] = useState<DiscoveryData>({ cafes: [], insufficientCafes: [], discoveries: [], industries: [], seeds: [] });
   const [selected, setSelected] = useState<number[]>([]);
   const [industrySelected, setIndustrySelected] = useState<number[]>([]);
@@ -390,7 +431,7 @@ function DiscoveryView() {
     finally { setBusy(""); }
   };
 
-  const candidates = data.discoveries.filter(item => item.origin === tab);
+  const candidates = tab === "learning" ? [] : data.discoveries.filter(item => item.origin === tab);
   const toggle = (id: number) => setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]);
   const selectAll = () => setSelected(current => {
     const other = current.filter(id => !candidates.some(item => item.id === id));
@@ -423,6 +464,7 @@ function DiscoveryView() {
       <button role="tab" aria-selected={tab === "cafe"} className={tab === "cafe" ? "active" : ""} onClick={() => setTab("cafe")}><b>A</b><span>카페 금맥<small>기존 데이터 역채굴</small></span></button>
       <button role="tab" aria-selected={tab === "text_mining"} className={tab === "text_mining" ? "active" : ""} onClick={() => setTab("text_mining")}><b>B</b><span>원문 어휘<small>통과 글 표현 추출</small></span></button>
       <button role="tab" aria-selected={tab === "industry"} className={tab === "industry" ? "active" : ""} onClick={() => setTab("industry")}><b>C</b><span>업종 사전<small>KSIC → 현업 어휘</small></span></button>
+      <button role="tab" aria-selected={tab === "learning"} className={tab === "learning" ? "active" : ""} onClick={() => setTab("learning")}><b>D</b><span>학습 제안<small>거부 사유 → 승인형 룰</small></span></button>
     </div>
 
     {message && <div className="discovery-message" role="status">{message}</div>}
@@ -471,7 +513,78 @@ function DiscoveryView() {
       </div>
       <CandidateApproval items={candidates} selected={selected} toggle={toggle} selectAll={selectAll} onApprove={() => void runAction("approve", { ids: selected.filter(id => candidates.some(item => item.id === id)) })} busy={busy} />
     </section>}
+
+    {tab === "learning" && <LearningPanel />}
   </div>;
+}
+
+function LearningPanel() {
+  const [data, setData] = useState<LearningData | null>(null);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch("/api/learning", { cache: "no-store" });
+      const payload = await response.json() as LearningData;
+      if (!response.ok) throw new Error(payload.error ?? "학습 데이터를 불러오지 못했습니다.");
+      setData(payload);
+      setSelected(current => current.filter(id => payload.suggestions.some(item => item.id === id && item.status === "pending")));
+    } catch (error) { setMessage(error instanceof Error ? error.message : "학습 데이터를 불러오지 못했습니다."); }
+  }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+
+  if (!data) return <section className="discovery-panel"><div className="discovery-empty">{message || "학습 통계를 불러오는 중입니다."}</div></section>;
+  const pending = data.suggestions.filter(item => item.status === "pending" && item.suggestion_type !== "prompt_example");
+  const promptExamples = data.suggestions.filter(item => item.suggestion_type === "prompt_example");
+  const maxReason = Math.max(1, ...data.stats.reasonDistribution.map(item => item.count));
+  const originLabel: Record<string, string> = { manual: "수동", cafe: "카페", text_mining: "원문 채굴", industry: "업종", unknown: "기존/미상" };
+  const verdictValue = data.stats.trackingProfile.topVerdict?.label;
+  const verdictLabel = verdictValue && verdictValue in MARKET_LABEL
+    ? MARKET_LABEL[verdictValue as MarketVerdict]
+    : "데이터 부족";
+
+  const approve = async () => {
+    if (!selected.length || busy) return;
+    setBusy(true); setMessage("");
+    try {
+      const response = await fetch("/api/learning", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "approve", ids: selected }) });
+      const result = await response.json() as { approved?: number; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "학습 제안을 승인하지 못했습니다.");
+      setMessage(`${result.approved ?? 0}개 제외 룰을 승인했습니다. 다음 저장부터 적용됩니다.`);
+      setSelected([]);
+      await load();
+    } catch (error) { setMessage(error instanceof Error ? error.message : "학습 제안을 승인하지 못했습니다."); }
+    finally { setBusy(false); }
+  };
+
+  return <section className="discovery-panel learning-panel">
+    <header><div><span>SAFE LEARNING</span><h2>거부 사유를 통계와 승인형 룰로 되먹이기</h2><p>점수 가중치는 바꾸지 않습니다. 2회 이상 반복된 제외 키워드·도메인만 제안하며, 체크해 승인하기 전에는 필터에 반영되지 않습니다.</p></div></header>
+    {message && <div className="discovery-message" role="status">{message}</div>}
+    <div className="learning-metrics">
+      <div><span>추적</span><strong>{data.stats.decisionCounts.tracking ?? 0}</strong></div>
+      <div><span>보류</span><strong>{data.stats.decisionCounts.holding ?? 0}</strong></div>
+      <div><span>기각</span><strong>{data.stats.decisionCounts.rejected ?? 0}</strong></div>
+      <div><span>프롬프트 개선 예시</span><strong>{data.stats.promptExampleCount}</strong></div>
+    </div>
+    <div className="learning-grid">
+      <section className="learning-card"><header><h3>기각 사유 분포</h3><small>최신 판정 기준</small></header><div className="reason-bars">{data.stats.reasonDistribution.map(item => <div key={item.label}><span>{item.label}</span><i><b style={{ width: `${item.count / maxReason * 100}%` }} /></i><strong>{item.count}</strong></div>)}{!data.stats.reasonDistribution.length && <p>기각 판정이 아직 없습니다.</p>}</div></section>
+      <section className="learning-card"><header><h3>origin별 추적률</h3><small>어느 발굴 축이 추적으로 이어졌는지</small></header><div className="origin-table">{data.stats.originStats.map(item => <div key={item.origin}><span>{originLabel[item.origin] ?? item.origin}</span><b>{item.tracking}/{item.decided}</b><strong>{Math.round(item.trackingRate * 100)}%</strong></div>)}{!data.stats.originStats.length && <p>판정 데이터가 아직 없습니다.</p>}</div></section>
+      <section className="learning-card tracking-profile"><header><h3>추적 후보 공통 특징</h3><small>통계 전용 · 점수 자동 반영 없음</small></header><p>주요 분야 <strong>{data.stats.trackingProfile.topDomain?.label ?? "데이터 부족"}</strong></p><p>주요 시장 <strong>{verdictLabel}</strong></p><p>주요 점수대 <strong>{data.stats.trackingProfile.topScoreBand?.label ?? "데이터 부족"}</strong></p></section>
+    </div>
+    <div className="learning-approval">
+      <div className="approval-head"><div><h3>룰 강화 제안</h3><span>근거 {data.minEvidence}회 이상만 승인 가능 · 승인 전 자동 반영 없음</span></div><button className="approve-button" onClick={() => void approve()} disabled={busy || !selected.length}>{busy ? "반영 중…" : `선택 ${selected.length}개 승인`}</button></div>
+      <div className="learning-suggestions">{pending.map(item => {
+        const canApprove = item.evidence_count >= data.minEvidence;
+        return <label key={item.id} className={`${selected.includes(item.id) ? "selected" : ""} ${canApprove ? "" : "insufficient"}`}><input type="checkbox" checked={selected.includes(item.id)} disabled={!canApprove} onChange={() => setSelected(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])} /><span><strong>{item.value}</strong><small>{item.suggestion_type === "keyword" ? "제외 키워드" : "제외 도메인"}</small></span><b>{item.evidence_count}회</b></label>;
+      })}{!pending.length && <div className="discovery-empty">승인 대기 중인 룰 제안이 없습니다.</div>}</div>
+    </div>
+    <details className="learning-history"><summary>룰 강화 이력 <b>{data.exclusions.length}</b></summary><div>{data.exclusions.map(item => <p key={item.id}><span>{item.kind === "keyword" ? "키워드" : "도메인"}</span><strong>{item.value}</strong><time>{new Date(item.created_at).toLocaleDateString("ko-KR")}</time></p>)}{!data.exclusions.length && <p>승인된 제외 룰이 없습니다.</p>}</div></details>
+    <details className="learning-history"><summary>2차 분석 프롬프트 개선 예시 <b>{promptExamples.length}</b></summary><div>{promptExamples.slice(0, 30).map(item => <p key={item.id}><span>요약 오류</span><strong>{item.value}</strong><time>{item.evidence_count}회</time></p>)}{!promptExamples.length && <p>수집된 개선 예시가 없습니다.</p>}</div></details>
+  </section>;
 }
 
 function CandidateApproval({ items, selected, toggle, selectAll, onApprove, busy }: { items: DiscoveryItem[]; selected: number[]; toggle: (id: number) => void; selectAll: () => void; onApprove: () => void; busy: string }) {

@@ -10,11 +10,12 @@ export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET;
   if (secret && request.headers.get("authorization") !== `Bearer ${secret}`) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const configs = await supabaseRest("run_configs?is_default=eq.true&limit=1") as RunConfig[] | null;
-  const queries = await resolveAutomaticQueries();
+  const resolved = await resolveAutomaticQueries();
   const base = configs?.[0] ?? {};
   const result = await runPipeline({
     ...base,
-    queries,
+    queries: resolved.queries,
+    query_origins: resolved.origins,
     auto_verify_top_n: Math.min(base.auto_verify_top_n ?? AUTO_RUN_LIMITS.AUTO_VERIFY_TOP_N, AUTO_RUN_LIMITS.AUTO_VERIFY_TOP_N),
     limits: {
       ...base.limits,

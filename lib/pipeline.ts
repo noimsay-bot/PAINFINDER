@@ -3,6 +3,7 @@ import { classifyMarket, createAppMarketSearchContext, mergeProducts, searchAppM
 import { getLlmProvider, LlmProviderError, resolveLlmModel, type LlmResult } from "./llm";
 import { calculateLlmCost } from "./llm/pricing";
 import { normalizeNaverText, searchNaver, type NaverSearchType } from "./naver";
+import { classifyFinalRuleRejection, type RuleExclusion } from "./rule-filter";
 import { calculateFourScores, type BuyerContext, type FourScores } from "./scoring";
 
 export type RunConfig = {
@@ -14,6 +15,7 @@ export type RunConfig = {
   mode_ratio?: number;
   families?: Record<string, number>;
   queries?: string[];
+  query_origins?: Record<string, string>;
   domains?: string[];
   excluded_domains?: string[];
   sources?: Record<string, boolean>;
@@ -32,6 +34,7 @@ type NormalizedRunConfig = {
   mode_ratio: number;
   families: Record<string, number>;
   queries: string[];
+  query_origins: Record<string, string>;
   excluded_domains: string[];
   sources: Record<string, boolean>;
   period_days: number;
@@ -47,9 +50,11 @@ type RawSignal = {
   title: string;
   body: string;
   posted_at: string | null;
+  query_text: string | null;
+  query_origin: string | null;
 };
 
-export type RejectReason = "구직" | "구매문의" | "가격불만" | "일회성" | "정보질문" | "학습" | "홍보" | "해결됨" | "기타";
+export type RejectReason = "구직" | "구매문의" | "가격불만" | "신체" | "일회성" | "정보질문" | "학습" | "홍보" | "해결됨" | "기타";
 type Stage1 = { id: string; pass: boolean; type?: string; reason?: string; reject_reason?: RejectReason };
 type Analysis = {
   pain_summary: string;
@@ -90,6 +95,7 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
     mode_ratio: Math.min(Math.max(input.mode_ratio ?? 70, 0), 100),
     families: input.families ?? { workaround: 30, question: 30, seeking: 20, giveup: 10, request: 10 },
     queries: [...new Set((input.queries ?? input.domains ?? []).map(query => query.trim()).filter(Boolean))],
+    query_origins: input.query_origins ?? {},
     excluded_domains: input.excluded_domains ?? ["연예", "정치", "스포츠"],
     sources: input.sources ?? { naverCafe: true, naverKin: true, naverBlog: true, appstore: true },
     period_days: Math.min(Math.max(input.period_days ?? 7, 1), 365),
@@ -132,7 +138,7 @@ async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries:
         for (const item of items.slice(0, remaining)) {
           const url = String(item.link ?? "");
           if (!url) continue;
-          collected.push({ source: type, source_id: url, url, title: String(item.title ?? ""), body: String(item.description ?? ""), posted_at: item.postdate ? String(item.postdate) : null });
+          collected.push({ source: type, source_id: url, url, title: String(item.title ?? ""), body: String(item.description ?? ""), posted_at: item.postdate ? String(item.postdate) : null, query_text: query, query_origin: config.query_origins[query] ?? "manual" });
         }
       } catch (error) { errors.push(`naver:${type}:${error instanceof Error ? error.message : "unknown"}`); }
     }
@@ -151,7 +157,7 @@ async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: st
       const data = await response.json() as { hits?: Array<Record<string, unknown>> };
       for (const hit of data.hits ?? []) {
         const id = String(hit.objectID ?? "");
-        result.push({ source: "hn", source_id: id, url: String(hit.url ?? `https://news.ycombinator.com/item?id=${id}`), title: normalizeNaverText(String(hit.title ?? "")), body: normalizeNaverText(String(hit.story_text ?? hit.title ?? "")), posted_at: String(hit.created_at ?? "") || null });
+        result.push({ source: "hn", source_id: id, url: String(hit.url ?? `https://news.ycombinator.com/item?id=${id}`), title: normalizeNaverText(String(hit.title ?? "")), body: normalizeNaverText(String(hit.story_text ?? hit.title ?? "")), posted_at: String(hit.created_at ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual" });
       }
     } catch (error) { errors.push(`hn:${error instanceof Error ? error.message : "unknown"}`); }
   }
@@ -170,7 +176,7 @@ async function collectThreads(config: ReturnType<typeof normalizeConfig>, querie
       url.searchParams.set("q", query); url.searchParams.set("search_type", "RECENT");
       url.searchParams.set("fields", "id,text,permalink,timestamp,username,has_replies"); url.searchParams.set("access_token", token);
       const response = await fetch(url); const data = await response.json() as { data?: Array<Record<string, unknown>> };
-      for (const item of data.data ?? []) result.push({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null });
+      for (const item of data.data ?? []) result.push({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual" });
     } catch (error) { errors.push(`threads:${error instanceof Error ? error.message : "unknown"}`); }
   }
   return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.threads);
@@ -189,7 +195,7 @@ async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, err
         const rating = Number((entry["im:rating"] as { label?: string } | undefined)?.label ?? 5);
         if (rating > 3) continue;
         const id = String((entry.id as { label?: string } | undefined)?.label ?? crypto.randomUUID());
-        result.push({ source: "appstore", source_id: id, url: id, title: String((entry.title as { label?: string } | undefined)?.label ?? "저평점 리뷰"), body: String((entry.content as { label?: string } | undefined)?.label ?? ""), posted_at: String((entry.updated as { label?: string } | undefined)?.label ?? "") || null });
+        result.push({ source: "appstore", source_id: id, url: id, title: String((entry.title as { label?: string } | undefined)?.label ?? "저평점 리뷰"), body: String((entry.content as { label?: string } | undefined)?.label ?? ""), posted_at: String((entry.updated as { label?: string } | undefined)?.label ?? "") || null, query_text: null, query_origin: "manual" });
       }
     } catch (error) { errors.push(`appstore:${app.appId}:${error instanceof Error ? error.message : "unknown"}`); }
   }
@@ -287,7 +293,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
     }
     return false;
   };
-  const rejectReasons = new Set<RejectReason>(["구직", "구매문의", "가격불만", "일회성", "정보질문", "학습", "홍보", "해결됨", "기타"]);
+  const rejectReasons = new Set<RejectReason>(["구직", "구매문의", "가격불만", "신체", "일회성", "정보질문", "학습", "홍보", "해결됨", "기타"]);
   const stage1: Stage1[] = [];
   let llm1Calls = 0;
   for (let offset = 0; offset < filtered.length && llm1Calls < llm1MaxCalls && !stoppedReason; offset += 20) {
@@ -299,7 +305,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
         jsonMode: true,
         maxOutputTokens: 2200,
         system: "너는 반복적인 프로세스·도구 문제만 통과시키는 엄격한 페인포인트 판정기다. 반드시 유효한 JSON 객체로만 응답하라.",
-        user: `다음 게시물을 엄격히 판정하라. 통과하려면 (1) 일회성이 아닌 반복 업무·생활 불편, (2) 글쓴이 본인 또는 소속 조직이 직접 겪는 문제, (3) 사람·가격·운·시장 상황이 아니라 프로세스나 도구의 문제를 모두 만족해야 한다. 하나라도 불명확하면 탈락시켜라. 즉시 제외: 구직·채용·이직·자기소개서·이력서·면접, 단순 구매/배송/재고/소량 문의, 가격·수수료 불만, 고장·사고·분쟁·환불 같은 일회성 사건, 단순 정보 질문, 학습·강의·자격증, 홍보·판매·모집, 이미 답변으로 해결된 질문. 통과는 {"id":"...","pass":true,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"reject_reason":"구직|구매문의|가격불만|일회성|정보질문|학습|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`,
+        user: `다음 게시물을 엄격히 판정하라. 통과하려면 (1) 일회성이 아닌 반복 업무·생활 불편, (2) 글쓴이 본인 또는 소속 조직이 직접 겪는 문제, (3) 사람·가격·운·시장 상황이 아니라 프로세스나 도구의 문제를 모두 만족해야 한다. 하나라도 불명확하면 탈락시켜라. 즉시 제외: 구직·채용·이직·자기소개서·이력서·면접·일자리 배정, 단순 구매/배송/재고/소량·N개 단위 문의, 가격·수수료 불만, 목·어깨·허리 통증과 눈 피로 같은 신체·건강 문제, 주차·식대·사업장 이전·특정 날짜 같은 일회성 환경 불만, 고장·사고·분쟁·환불 같은 일회성 사건, 단순 정보 질문, 학습·강의·자격증, 홍보·판매·모집, 이미 답변으로 해결된 질문. 통과는 {"id":"...","pass":true,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"reject_reason":"구직|구매문의|가격불만|신체|일회성|정보질문|학습|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`,
       });
       llm1Calls++;
       recordUsage(completion);
@@ -441,11 +447,25 @@ export async function supabaseRest(path: string, init: RequestInit = {}) {
 }
 
 export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>) {
-  const created = await supabaseRest("run_logs", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ config_id: result.config.id ?? null, started_at: result.startedAt, ended_at: result.endedAt, stage_counts: result.stageCounts, llm_calls: result.llmCalls, cost_estimate: result.costEstimate, stopped_reason: result.stoppedReason, errors: result.errors }) }) as Array<{ id: string }> | null;
-  const runId = created?.[0]?.id;
-  if (!runId) return { runId: null, savedCandidates: 0, savedCompetitors: 0 };
-
+  const exclusionRows = await supabaseRest("rule_exclusions?active=eq.true&select=kind,value&limit=1000") as Array<{ kind: string; value: string }> | null;
+  const exclusions = (exclusionRows ?? []).filter((row): row is RuleExclusion => ["keyword", "domain"].includes(row.kind) && Boolean(row.value));
+  const finalRejectByKey = new Map<string, string>();
   const rawKey = (source: string, sourceId: string) => `${source}\u0000${sourceId}`;
+  const acceptedCandidates = result.candidates.filter(candidate => {
+    const reason = classifyFinalRuleRejection({
+      title: candidate.raw.title,
+      body: candidate.raw.body,
+      summary: candidate.analysis.pain_summary,
+      domain: candidate.analysis.domain,
+    }, exclusions);
+    if (reason) finalRejectByKey.set(rawKey(candidate.raw.source, candidate.raw.source_id), reason);
+    return !reason;
+  });
+  const stageCounts = { ...result.stageCounts, finalRuleRejected: finalRejectByKey.size };
+  const created = await supabaseRest("run_logs", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ config_id: result.config.id ?? null, started_at: result.startedAt, ended_at: result.endedAt, stage_counts: stageCounts, llm_calls: result.llmCalls, cost_estimate: result.costEstimate, stopped_reason: result.stoppedReason, errors: result.errors }) }) as Array<{ id: string }> | null;
+  const runId = created?.[0]?.id;
+  if (!runId) return { runId: null, savedCandidates: 0, savedCompetitors: 0, finalRuleRejected: finalRejectByKey.size };
+
   const rawByKey = new Map<string, Record<string, unknown>>();
   for (const { raw, result: decision } of result.stage1Evaluations) {
     rawByKey.set(rawKey(raw.source, raw.source_id), {
@@ -456,11 +476,12 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
     });
   }
   for (const candidate of result.candidates) {
+    const finalRejectReason = finalRejectByKey.get(rawKey(candidate.raw.source, candidate.raw.source_id));
     rawByKey.set(rawKey(candidate.raw.source, candidate.raw.source_id), {
       ...candidate.raw,
       run_id: runId,
-      status: "analyzed",
-      reject_reason: null,
+      status: finalRejectReason ? "rule_rejected" : "analyzed",
+      reject_reason: finalRejectReason ?? null,
     });
   }
 
@@ -474,7 +495,7 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
     : [];
   const rawIdByKey = new Map((storedRawRows ?? []).map(row => [rawKey(row.source, row.source_id), row.id]));
   const candidateByRawId = new Map<string, (typeof result.candidates)[number]>();
-  for (const candidate of result.candidates) {
+  for (const candidate of acceptedCandidates) {
     const rawId = rawIdByKey.get(rawKey(candidate.raw.source, candidate.raw.source_id));
     if (rawId) candidateByRawId.set(rawId, candidate);
   }
@@ -545,5 +566,6 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
     runId,
     savedCandidates: painRows?.length ?? 0,
     savedCompetitors: competitorRows.length,
+    finalRuleRejected: finalRejectByKey.size,
   };
 }
