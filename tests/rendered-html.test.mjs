@@ -69,6 +69,7 @@ test("시장 포화 교정과 승인형 거부 학습 경로를 코드에 고정
   assert.match(competitors, /paidCount >= 5 \|\| products\.length >= 5/);
   assert.match(page, /crowded:\s*"붐빔"/);
   assert.match(dashboard, /\.filter\(candidate => !candidate\.ruleRejected\)/);
+  assert.match(dashboard, /marketPriority\(b\.marketVerdict\) - marketPriority\(a\.marketVerdict\)/);
   assert.match(decisions, /reason_category:\s*reasonCategory/);
   assert.match(learning, /evidence_count=gte\.\$\{LEARNING_MIN_EVIDENCE\}/);
   assert.match(learning, /rule_exclusions\?on_conflict=kind,value/);

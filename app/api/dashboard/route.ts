@@ -33,6 +33,10 @@ function marketVerdict(value: unknown): MarketVerdict {
     : "empty";
 }
 
+function marketPriority(verdict: MarketVerdict) {
+  return ({ paid_exists: 5, empty: 4, crowded: 3, unverified: 2, all_free: 1, public_owned: 0 } as const)[verdict];
+}
+
 export async function GET() {
   try {
     const [painRows, logRows] = await Promise.all([
@@ -102,7 +106,12 @@ export async function GET() {
         createdAt: String(row.created_at ?? ""),
       };
     }).filter(candidate => !candidate.ruleRejected)
-      .sort((a, b) => Number(b.precisionVerified) - Number(a.precisionVerified) || b.score - a.score || b.createdAt.localeCompare(a.createdAt));
+      .sort((a, b) =>
+        Number(b.precisionVerified) - Number(a.precisionVerified)
+        || b.score - a.score
+        || marketPriority(b.marketVerdict) - marketPriority(a.marketVerdict)
+        || b.createdAt.localeCompare(a.createdAt)
+      );
 
     const logs = (logRows ?? []).map((row) => ({
       id: String(row.id),
