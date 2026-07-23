@@ -53,6 +53,11 @@ function cafeNameFromHtml(html: string) {
   return name && !/^네이버\s*카페$/i.test(name) ? name.slice(0, 120) : null;
 }
 
+function isUsableCafeName(value: unknown) {
+  const name = String(value ?? "").trim();
+  return name.length >= 2 && !name.includes("\uFFFD");
+}
+
 async function fetchAndCacheCafeName(cafeId: string) {
   let cafeName: string | null = null;
   let fetchError: string | null = null;
@@ -63,7 +68,13 @@ async function fetchAndCacheCafeName(cafeId: string) {
       signal: AbortSignal.timeout(5000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    cafeName = cafeNameFromHtml(await response.text());
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const headerCharset = response.headers.get("content-type")?.match(/charset\s*=\s*["']?([^;"'\s]+)/i)?.[1] ?? "";
+    const head = new TextDecoder("latin1").decode(bytes.slice(0, 4096));
+    const metaCharset = head.match(/charset\s*=\s*["']?([^;"'\s/>]+)/i)?.[1] ?? "";
+    const declaredCharset = headerCharset || metaCharset;
+    const encoding = /euc-?kr|ks_?c_?5601|cp949|ms949/i.test(declaredCharset) ? "euc-kr" : "utf-8";
+    cafeName = cafeNameFromHtml(new TextDecoder(encoding).decode(bytes));
     if (!cafeName) throw new Error("카페명 메타데이터 없음");
   } catch (error) {
     fetchError = error instanceof Error ? error.message.slice(0, 200) : "조회 실패";
@@ -137,7 +148,7 @@ async function loadCafeStats() {
   const insufficient = ranked.filter(item => item.collected < 5);
   const cachedRows = await supabaseRest("cafe_names?select=cafe_id,cafe_name,fetched_at,fetch_error&limit=1000") as Row[] | null;
   const cached = new Map((cachedRows ?? []).map(row => [String(row.cafe_id), row]));
-  const missing = main.filter(item => !cached.has(item.cafeId));
+  const missing = main.filter(item => !isUsableCafeName(cached.get(item.cafeId)?.cafe_name));
   let cursor = 0;
   const worker = async () => {
     while (cursor < missing.length) {
@@ -148,7 +159,7 @@ async function loadCafeStats() {
   await Promise.all(Array.from({ length: Math.min(4, missing.length) }, () => worker()));
   for (const item of main) {
     const row = cached.get(item.cafeId);
-    if (row?.cafe_name) item.cafeName = String(row.cafe_name);
+    if (isUsableCafeName(row?.cafe_name)) item.cafeName = String(row?.cafe_name);
   }
   return { main, insufficient };
 }
