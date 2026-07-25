@@ -75,7 +75,7 @@ type RunLog = {
 const NAV: { id: View; label: string; mark: string; count?: number }[] = [
   { id: "today", label: "오늘의 후보", mark: "01" },
   { id: "signals", label: "반복 신호", mark: "02" },
-  { id: "discovery", label: "검색어 발굴", mark: "03" },
+  { id: "discovery", label: "주목 카페·발굴", mark: "03" },
   { id: "settings", label: "실행 설정", mark: "04" },
   { id: "archive", label: "보류함", mark: "05" },
   { id: "logs", label: "실행 로그", mark: "06" },
@@ -306,7 +306,7 @@ export default function Home() {
   const titles: Record<View, [string, string]> = {
     today: ["오늘의 후보", "경쟁 검증을 통과한 신호부터 검토하세요."],
     signals: ["반복 신호", "서로 다른 시점과 출처에서 다시 나타난 문제입니다."],
-    discovery: ["검색어 발굴", "수집 데이터와 업종 사전에서 후보를 찾고, 승인한 표현만 시드로 보냅니다."],
+    discovery: ["주목 카페·검색어 발굴", "가입한 카페를 조준하고, 수집 데이터와 업종 사전에서 검색어 후보를 찾습니다."],
     settings: ["실행 설정", "검색어, 수집 소스, 비용 상한을 정하고 바로 실행합니다."],
     archive: ["보류함", "판단 기준이 바뀌면 언제든 다시 검토할 수 있습니다."],
     logs: ["실행 로그", "어디서 걸러졌고 왜 멈췄는지 숨김없이 보여줍니다."],

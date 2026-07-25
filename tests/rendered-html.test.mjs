@@ -13,14 +13,14 @@ async function render() {
   );
 }
 
-test("Painfinder 제품 화면과 검색어 발굴 메뉴를 서버 렌더링한다", async () => {
+test("Painfinder 제품 화면과 주목 카페·검색어 발굴 메뉴를 서버 렌더링한다", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<title>Painfinder — 페인포인트 검증 콘솔<\/title>/);
   assert.match(html, /PAIN<strong>FINDER<\/strong>/);
-  assert.match(html, /검색어 발굴/);
+  assert.match(html, /주목 카페·발굴/);
   assert.match(html, /실제 데이터를 불러오는 중입니다/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Codex is working/i);
 });
