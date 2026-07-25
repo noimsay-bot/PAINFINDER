@@ -93,7 +93,7 @@ export function mergeSimilarCandidates<T extends ReviewQueueCandidate>(candidate
   for (const candidate of sorted) {
     const group = groups.find(entry =>
       entry.representative.domain === candidate.domain
-      && summarySimilarity(entry.representative.summary, candidate.summary) >= 0.3);
+      && summarySimilarity(entry.representative.summary, candidate.summary) >= 0.15);
     if (group) group.members.push(candidate);
     else groups.push({ representative: candidate, members: [candidate] });
   }
