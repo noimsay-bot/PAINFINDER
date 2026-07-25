@@ -133,6 +133,19 @@ create table if not exists cafe_names (
   fetch_error text
 );
 
+create table if not exists watched_cafes (
+  id bigint generated always as identity primary key,
+  cafe_id text not null unique,
+  cafe_name text not null,
+  topic_seeds jsonb not null default '[]'::jsonb,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table raw_items add column if not exists watched boolean not null default false;
+alter table raw_items add column if not exists watched_cafe_id text references watched_cafes(cafe_id) on delete set null;
+
 create table if not exists query_discoveries (
   id bigint generated always as identity primary key,
   origin text not null check (origin in ('cafe','text_mining','industry')),
@@ -193,6 +206,7 @@ create table if not exists filter_additions (
 alter table learning_suggestions enable row level security;
 alter table rule_exclusions enable row level security;
 alter table filter_additions enable row level security;
+alter table watched_cafes enable row level security;
 
 create index if not exists pain_points_cluster_idx on pain_points(cluster_id);
 create index if not exists pain_points_recurrence_idx on pain_points(recurrence_count desc);
@@ -202,6 +216,8 @@ create index if not exists learning_suggestions_status_idx on learning_suggestio
 create index if not exists rule_exclusions_active_idx on rule_exclusions(active, kind, created_at desc);
 create index if not exists filter_additions_active_idx on filter_additions(active, kind, added_at desc);
 create index if not exists filter_additions_origin_idx on filter_additions(origin_pain_point_id, added_at desc);
+create index if not exists watched_cafes_active_idx on watched_cafes(active, created_at);
+create index if not exists raw_items_watched_idx on raw_items(watched, watched_cafe_id, collected_at desc);
 create index if not exists query_discoveries_pending_idx on query_discoveries(origin, approved_at, frequency desc);
 create index if not exists industry_seeds_round_robin_idx on industry_seeds(done, created_at, id);
 create index if not exists industry_seeds_active_section_idx on industry_seeds(active, section, done, ksic_code);

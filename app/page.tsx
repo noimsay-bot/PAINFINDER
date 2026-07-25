@@ -38,6 +38,9 @@ type Candidate = {
   promotionalRuleFlagged: boolean;
   highlightTerms: string[];
   sourceName: string | null;
+  watched: boolean;
+  watchedCafeId: string | null;
+  watchedCafeName: string | null;
   authorName: string | null;
   isCafe: boolean;
   naverSearchUrl: string;
@@ -204,6 +207,7 @@ export default function Home() {
   const [selectedId, setSelectedId] = useState("");
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("전체 소스");
+  const [watchedOnly, setWatchedOnly] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectCategory, setRejectCategory] = useState<RejectionReasonCategory | "">("");
   const [rejectNote, setRejectNote] = useState("");
@@ -239,8 +243,9 @@ export default function Home() {
   ), [items, visibilityNow]);
   const visible = useMemo(() => todayItems.filter(item =>
     (sourceFilter === "전체 소스" || item.source === sourceFilter) &&
+    (!watchedOnly || item.watched) &&
     (item.summary.includes(search) || item.domain.includes(search) || item.who.includes(search))
-  ), [todayItems, search, sourceFilter]);
+  ), [todayItems, search, sourceFilter, watchedOnly]);
   const selected = items.find(i => i.id === selectedId) ?? todayItems[0] ?? items[0];
 
   const verifyCandidate = useCallback(async (painPointId: string) => {
@@ -324,9 +329,9 @@ export default function Home() {
 
       <section className="workspace">
         <Topbar title={titles[view][0]} subtitle={titles[view][1]} dark={dark} setDark={setDark} />
-        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
+        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} watchedOnly={watchedOnly} setWatchedOnly={setWatchedOnly} onDecision={decide} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
         {view === "signals" && <SignalsView items={todayItems} onOpen={(id) => { setSelectedId(id); setView("today"); }} />}
-        {view === "discovery" && <DiscoveryView />}
+        {view === "discovery" && <DiscoveryView onRunComplete={loadDashboard} />}
         {view === "settings" && <SettingsView onRunComplete={loadDashboard} />}
         {view === "archive" && <ArchiveView items={items} onRestore={(id) => { setSelectedId(id); setView("today"); }} />}
         {view === "logs" && <LogsView runs={logs} />}
@@ -337,8 +342,8 @@ export default function Home() {
   );
 }
 
-function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, onDecision, onVerify, verifyingId, rejecting, setRejecting, rejectCategory, setRejectCategory, rejectNote, setRejectNote }: {
-  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; onDecision: (d: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => Promise<void>; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectCategory: RejectionReasonCategory | ""; setRejectCategory: (v: RejectionReasonCategory | "") => void; rejectNote: string; setRejectNote: (v: string) => void;
+function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, watchedOnly, setWatchedOnly, onDecision, onVerify, verifyingId, rejecting, setRejecting, rejectCategory, setRejectCategory, rejectNote, setRejectNote }: {
+  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; watchedOnly: boolean; setWatchedOnly: (v: boolean) => void; onDecision: (d: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => Promise<void>; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectCategory: RejectionReasonCategory | ""; setRejectCategory: (v: RejectionReasonCategory | "") => void; rejectNote: string; setRejectNote: (v: string) => void;
 }) {
   const rejected = allItems.filter(item => item.decision === "rejected").length;
   return <div className="today-layout">
@@ -352,13 +357,14 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
       <div className="filter-row">
         <label className="searchbox"><span>⌕</span><input value={search} onChange={e => setSearch(e.target.value)} placeholder="후보 검색" /></label>
         <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)} aria-label="소스 필터"><option>전체 소스</option><option>네이버 카페</option><option>지식iN</option><option>네이버 블로그</option><option>앱 리뷰</option><option>Threads</option></select>
+        <button className={`watched-filter ${watchedOnly ? "active" : ""}`} onClick={() => setWatchedOnly(!watchedOnly)} aria-pressed={watchedOnly}>★ 주목 카페만</button>
         <button className="export-button" onClick={() => downloadCandidatesText(allItems)} disabled={!allItems.length} title="클로드 공유용 TXT 파일로 저장">전체 TXT ↓</button>
       </div>
       <div className="list-head"><span>후보 {visible.length}건</span><small>최근 실행 · {lastRun ? new Date(lastRun.startedAt).toLocaleString("ko-KR") : "없음"}</small></div>
       <div className="candidate-list">
         {visible.map(item => <button key={item.id} className={`candidate-row ${selected.id === item.id ? "selected" : ""} ${item.recentlyRejected ? "recently-rejected" : ""}`} onClick={() => setSelectedId(item.id)}>
           <div className="row-status"><i className={`status-dot ${item.decision}`} /><ScoreGauge score={item.score} max={item.scoreMax} /></div>
-          <div className="row-main"><h3>{item.summary}</h3><div><span className={`source-tag ${item.sourceTone}`}>{item.source}</span><span>{item.domain}</span><span>{item.time}</span>{item.recurrence >= 3 && <span className="repeat-tag">↻ {item.recurrence}회 반복</span>}</div></div>
+          <div className="row-main"><h3>{item.summary}</h3><div><span className={`source-tag ${item.sourceTone}`}>{item.source}</span>{item.watched && <span className="watched-cafe-tag">★ {item.watchedCafeName ?? item.sourceName ?? "주목 카페"}</span>}<span>{item.domain}</span><span>{item.time}</span>{item.recurrence >= 3 && <span className="repeat-tag">↻ {item.recurrence}회 반복</span>}</div></div>
           <div className={`market-badge ${item.marketVerdict}`}>{marketLabel(item)}</div>
           <span className={`status-label ${item.decision}`}>{STATUS_LABEL[item.decision]}</span>
         </button>)}
@@ -368,14 +374,15 @@ function TodayView({ allItems, visible, selected, lastRun, setSelectedId, search
 
     <aside className="detail-pane">
       <div className="detail-scroll">
-        <div className="detail-kicker"><span className={`source-tag ${selected.sourceTone}`}>{selected.source}</span>{selected.sourceName && <span>{selected.sourceName}</span>}<span>{selected.time}</span><span>ID · PF-{String(selected.id).padStart(4, "0")}</span></div>
+        <div className="detail-kicker"><span className={`source-tag ${selected.sourceTone}`}>{selected.source}</span>{selected.watched && <span className="watched-access-badge">가입한 카페 · 원문 열람 가능</span>}{selected.sourceName && <span>{selected.sourceName}</span>}<span>{selected.time}</span><span>ID · PF-{String(selected.id).padStart(4, "0")}</span></div>
         <div className="detail-title"><div><h2>{selected.summary}</h2><p>{selected.who} · {selected.frequency} 발생</p></div><ScoreGauge score={selected.score} max={selected.scoreMax} /></div>
         <section className="detail-section original">
           <header><h3>원문 스니펫 전문</h3><div className="original-links"><a href={selected.url} target="_blank" rel="noreferrer">원문 보기 ↗</a><a href={selected.naverSearchUrl} target="_blank" rel="noreferrer">네이버에서 검색 ↗</a></div></header>
-          <div className="snippet-meta"><span>{selected.bodyLength}자</span>{selected.postedAt && <time>게시일 {new Date(selected.postedAt).toLocaleDateString("ko-KR")}</time>}{selected.isCafe && <span className="join-warning">카페 가입이 필요할 수 있음</span>}</div>
+          {selected.watched && <a className="watched-original-link" href={selected.url} target="_blank" rel="noreferrer"><span>가입한 카페에서 직접 판단하기</span><strong>원문 크게 보기 ↗</strong></a>}
+          <div className="snippet-meta"><span>{selected.bodyLength}자</span>{selected.postedAt && <time>게시일 {new Date(selected.postedAt).toLocaleDateString("ko-KR")}</time>}{selected.isCafe && (selected.watched ? <span className="watched-access-badge">가입한 카페 · 원문 열람 가능</span> : <span className="join-warning">카페 가입이 필요할 수 있음</span>)}</div>
           {selected.isPromotional && <div className="promotion-warning"><strong>광고 의심</strong><span>자동 광고 판정 신호가 있어 사람이 다시 검토해야 합니다.</span></div>}
           {!selected.isPromotional && selected.promotionalRuleFlagged && <div className="promotion-signal"><strong>광고 신호 감지</strong><span>룰 신호는 있었지만 LLM은 현재 페인포인트로 판정했습니다. 원문을 직접 확인하세요.</span></div>}
-          {selected.lowConfidence && <div className="confidence-warning"><strong>판단 재료 부족</strong><span>스니펫이 40자 미만이라 판정 신뢰도가 낮습니다.</span></div>}
+          {selected.lowConfidence && <div className="confidence-warning"><strong>{selected.watched ? "원문 확인 필요" : "판단 재료 부족"}</strong><span>{selected.watched ? "스니펫이 짧아도 통과시켰습니다. 가입한 카페 원문에서 직접 판단하세요." : "스니펫이 40자 미만이라 판정 신뢰도가 낮습니다."}</span></div>}
           <blockquote>“<HighlightText text={selected.excerpt} terms={selected.highlightTerms} />”</blockquote>
         </section>
         <section className="detail-section analysis"><header><h3>LLM 분석</h3><span>구조화 분석 완료</span></header><dl><div><dt>누가</dt><dd>{selected.who}</dd></div><div><dt>무엇을</dt><dd>{selected.summary}</dd></div><div><dt>어떻게 때우는가</dt><dd>{selected.workaround}</dd></div><div><dt>빈도</dt><dd><span className="amber-text">{selected.frequency}</span> · {selected.signal}</dd></div><div><dt>지불 신호</dt><dd>{selected.money ? `“${selected.money}”` : <span className="muted">명시적 신호 없음</span>}</dd></div></dl></section>
@@ -408,9 +415,10 @@ function SignalsView({ items, onOpen }: { items: Candidate[]; onOpen: (id: strin
 
 type DiscoveryItem = { id: number; origin: "cafe" | "text_mining" | "industry"; term: string; category: string; source_ref: string; frequency: number };
 type CafeStat = { cafeId: string; cafeName: string | null; collected: number; passed: number; passRate: number };
+type WatchedCafeStat = { id: number; cafeId: string; cafeName: string; topicSeeds: string[]; active: boolean; createdAt: string; collected: number; passed: number; tracked: number; trackingRate: number };
 type IndustryTranslation = { roles?: string[]; tools?: string[]; tasks?: string[] };
 type IndustrySeed = { id: number; ksic_code: string; ksic_name: string; section: string | null; active: boolean; note: string | null; done: boolean; translation: IndustryTranslation | null; translated_at: string | null };
-type DiscoveryData = { cafes: CafeStat[]; insufficientCafes: CafeStat[]; discoveries: DiscoveryItem[]; industries: IndustrySeed[]; seeds: Array<{ id: number; query_text: string; origin: string; active: boolean; last_used_at: string | null }>; error?: string };
+type DiscoveryData = { cafes: CafeStat[]; insufficientCafes: CafeStat[]; watchedCafes: WatchedCafeStat[]; discoveries: DiscoveryItem[]; industries: IndustrySeed[]; seeds: Array<{ id: number; query_text: string; origin: string; active: boolean; last_used_at: string | null }>; error?: string };
 type LearningSuggestion = { id: number; suggestion_type: "keyword" | "promotional_keyword" | "domain" | "prompt_example"; value: string; evidence_count: number; status: "pending" | "approved" | "dismissed"; created_at: string };
 type FilterAddition = { id: number; keyword: string; kind: "keyword" | "domain"; source_reason: string; mode: "auto" | "approved"; added_at: string; active: boolean; revoked_at: string | null };
 type LearningData = {
@@ -438,9 +446,9 @@ const KSIC_SECTION_LABELS: Record<string, string> = {
   CUSTOM: "카페 입력",
 };
 
-function DiscoveryView() {
+function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }) {
   const [tab, setTab] = useState<"cafe" | "text_mining" | "industry" | "learning">("cafe");
-  const [data, setData] = useState<DiscoveryData>({ cafes: [], insufficientCafes: [], discoveries: [], industries: [], seeds: [] });
+  const [data, setData] = useState<DiscoveryData>({ cafes: [], insufficientCafes: [], watchedCafes: [], discoveries: [], industries: [], seeds: [] });
   const [selected, setSelected] = useState<number[]>([]);
   const [industrySelected, setIndustrySelected] = useState<number[]>([]);
   const [industrySearch, setIndustrySearch] = useState("");
@@ -448,14 +456,23 @@ function DiscoveryView() {
   const [industrySort, setIndustrySort] = useState<"pending" | "section">("pending");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
+  const [watchedCafeId, setWatchedCafeId] = useState("");
+  const [watchedCafeName, setWatchedCafeName] = useState("아프니까 사장이다");
+  const [watchedSeeds, setWatchedSeeds] = useState("자영업, 폐업, 임대료, 배달수수료, 알바, 매출, 세금, 권리금");
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/discovery", { cache: "no-store" });
+      const [response, watchedResponse] = await Promise.all([
+        fetch("/api/discovery", { cache: "no-store" }),
+        fetch("/api/watched-cafes", { cache: "no-store" }),
+      ]);
       const payload = await response.json() as DiscoveryData;
+      const watchedPayload = await watchedResponse.json() as { watchedCafes?: WatchedCafeStat[]; error?: string };
       if (!response.ok) throw new Error(payload.error ?? "검색어 발굴 데이터를 불러오지 못했습니다.");
-      setData(payload);
-      setIndustrySelected(current => current.filter(id => payload.industries.some(industry => industry.id === id && !industry.done)));
+      if (!watchedResponse.ok) throw new Error(watchedPayload.error ?? "주목 카페를 불러오지 못했습니다.");
+      const merged = { ...payload, watchedCafes: watchedPayload.watchedCafes ?? [] };
+      setData(merged);
+      setIndustrySelected(current => current.filter(id => merged.industries.some(industry => industry.id === id && !industry.done)));
     } catch (error) { setMessage(error instanceof Error ? error.message : "검색어 발굴 데이터를 불러오지 못했습니다."); }
   }, []);
   useEffect(() => {
@@ -471,13 +488,53 @@ function DiscoveryView() {
       const result = await response.json() as { error?: string; added?: number; created?: number; translated?: number; calls?: number };
       if (!response.ok) throw new Error(result.error ?? "작업에 실패했습니다.");
       if (action === "approve") { setMessage(tab === "industry" ? `${result.added ?? 0}개 검색어를 시드에 추가했습니다. 업종 출처 시드는 자동 실행에서 제외됩니다.` : `${result.added ?? 0}개 검색어를 시드에 추가했습니다.`); setSelected([]); }
-      if (action === "cafe-focus") setMessage(`${result.created ?? 0}개 집중 수집어를 만들었습니다. 아래에서 승인할 항목을 고르세요.`);
       if (action === "cafe-to-industry") { setMessage("카페 이름을 업종 번역 대기열에 보냈습니다."); setTab("industry"); }
       if (action === "mine-text") setMessage(`${result.calls ?? 0}회 배치 호출로 ${result.created ?? 0}개 원문 어휘를 찾았습니다.`);
       if (action === "translate-industries") { setMessage(`${result.translated ?? 0}개 업종을 ${result.calls ?? 0}회 호출로 번역했습니다.`); setIndustrySelected([]); }
       await load();
     } catch (error) { setMessage(error instanceof Error ? error.message : "작업에 실패했습니다."); }
     finally { setBusy(""); }
+  };
+
+  const runWatchedAction = async (action: "save" | "toggle" | "focus", extra: Record<string, unknown> = {}) => {
+    if (busy) return;
+    setBusy(`watched-${action}`); setMessage("");
+    try {
+      const response = await fetch("/api/watched-cafes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...extra }),
+      });
+      const result = await response.json() as { error?: string; savedCandidates?: number; stageCounts?: Record<string, number>; queries?: string[] };
+      if (!response.ok) throw new Error(result.error ?? "주목 카페 작업에 실패했습니다.");
+      if (action === "save") {
+        setMessage("주목 카페를 저장했습니다. 매일 자동 실행에서 최대 4개 조준 검색 슬롯을 사용합니다.");
+        setWatchedCafeId("");
+      }
+      if (action === "toggle") setMessage("활성 상태를 변경했습니다.");
+      if (action === "focus") {
+        const watchedCount = Number(result.stageCounts?.watchedCollected ?? 0);
+        setMessage(`조준 수집 완료 · 주목 카페 일치 ${watchedCount}건 · 새 후보 ${result.savedCandidates ?? 0}건`);
+        await onRunComplete();
+      }
+      await load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "주목 카페 작업에 실패했습니다.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const editWatchedCafe = (cafe: WatchedCafeStat) => {
+    setWatchedCafeId(cafe.cafeId);
+    setWatchedCafeName(cafe.cafeName);
+    setWatchedSeeds(cafe.topicSeeds.join(", "));
+  };
+
+  const prepareCafeRegistration = (cafe: CafeStat) => {
+    setWatchedCafeId(cafe.cafeId);
+    setWatchedCafeName(cafe.cafeName ?? cafe.cafeId);
+    setMessage("주제어를 확인한 뒤 주목 카페로 저장하세요. 저장 후 즉시 집중 수집할 수 있습니다.");
   };
 
   const candidates = tab === "learning" ? [] : data.discoveries.filter(item => item.origin === tab);
@@ -519,10 +576,32 @@ function DiscoveryView() {
     {message && <div className="discovery-message" role="status">{message}</div>}
 
     {tab === "cafe" && <section className="discovery-panel">
-      <header><div><span>AXIS A</span><h2>통과 건수가 많은 카페부터 넓히기</h2><p>표본 5건 이상만 메인 랭킹에 표시하며, 통과 건수 → 통과율 순으로 정렬합니다. 집중 수집은 승인 전까지 실행되지 않습니다.</p></div></header>
+      <header><div><span>AXIS A</span><h2>주목 카페를 조준하고, 기존 카페 금맥도 넓히기</h2><p>네이버 API는 특정 카페만 검색할 수 없습니다. 주제어로 전체 카페를 검색한 뒤 URL의 카페 ID가 일치하는 글을 우선 표시합니다.</p></div></header>
+      <div className="watched-cafe-manager">
+        <div className="watched-manager-head"><div><strong>★ 주목 카페</strong><span>가입한 카페의 원문은 링크로 직접 읽고 최종 판단합니다.</span></div><em>원문 크롤링 없음</em></div>
+        <div className="watched-cafe-form">
+          <label><span>카페 ID</span><input value={watchedCafeId} onChange={event => setWatchedCafeId(event.target.value)} placeholder="cafe.naver.com/{cafe_id}" /></label>
+          <label><span>카페명</span><input value={watchedCafeName} onChange={event => setWatchedCafeName(event.target.value)} placeholder="아프니까 사장이다" /></label>
+          <label className="watched-seeds-input"><span>주제어 · 쉼표 구분</span><input value={watchedSeeds} onChange={event => setWatchedSeeds(event.target.value)} placeholder="자영업, 폐업, 임대료…" /></label>
+          <button onClick={() => void runWatchedAction("save", { cafeId: watchedCafeId, cafeName: watchedCafeName, topicSeeds: watchedSeeds })} disabled={Boolean(busy) || !watchedCafeId.trim() || !watchedCafeName.trim() || !watchedSeeds.trim()}>{busy === "watched-save" ? "저장 중…" : "주목 카페 저장"}</button>
+        </div>
+        <p className="watched-explainer">집중 수집은 “이 카페만 검색”이 아니라, 등록한 주제어로 넓게 검색해 이 카페 글을 우선 표시하는 방식입니다.</p>
+        <div className="watched-cafe-list">
+          {data.watchedCafes.map(cafe => <article className={!cafe.active ? "inactive" : ""} key={cafe.id}>
+            <div><span className="watched-access-badge">{cafe.active ? "활성" : "비활성"}</span><strong>{cafe.cafeName}</strong><code>{cafe.cafeId}</code></div>
+            <p>{cafe.topicSeeds.join(" · ")}</p>
+            <dl><div><dt>수집</dt><dd>{cafe.collected}</dd></div><div><dt>1차 통과</dt><dd>{cafe.passed}</dd></div><div><dt>추적</dt><dd>{cafe.tracked}</dd></div><div><dt>추적률</dt><dd>{(cafe.trackingRate * 100).toFixed(1)}%</dd></div></dl>
+            <footer><button onClick={() => editWatchedCafe(cafe)} disabled={Boolean(busy)}>편집</button><button onClick={() => void runWatchedAction("toggle", { id: cafe.id, active: !cafe.active })} disabled={Boolean(busy)}>{cafe.active ? "비활성화" : "활성화"}</button><button className="focus-run-button" onClick={() => void runWatchedAction("focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy) || !cafe.active}>{busy === "watched-focus" ? "수집 중…" : "이 카페 집중 수집"}</button></footer>
+          </article>)}
+          {!data.watchedCafes.length && <div className="discovery-empty">아직 등록된 주목 카페가 없습니다. 위에 카페 ID를 입력해 시작하세요.</div>}
+        </div>
+      </div>
       <div className="cafe-table">
         <div className="cafe-head"><span>카페 ID</span><span>카페명</span><span>수집</span><span>통과</span><span>통과율</span><span>활용</span></div>
-        {data.cafes.map(cafe => <div className="cafe-row" key={cafe.cafeId}><strong>{cafe.cafeId}</strong><span>{cafe.cafeName ?? cafe.cafeId}</span><b>{cafe.collected}</b><b>{cafe.passed}</b><div><i style={{ width: `${Math.round(cafe.passRate * 100)}%` }} /><em>{(cafe.passRate * 100).toFixed(1)}%</em></div><div><button onClick={() => void runAction("cafe-focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>{busy === "cafe-focus" ? "생성 중" : "이 카페 집중 수집"}</button><button className="link-button" onClick={() => void runAction("cafe-to-industry", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>업종 번역으로 →</button></div></div>)}
+        {data.cafes.map(cafe => {
+          const watched = data.watchedCafes.find(item => item.cafeId === cafe.cafeId);
+          return <div className="cafe-row" key={cafe.cafeId}><strong>{cafe.cafeId}</strong><span>{cafe.cafeName ?? cafe.cafeId}{watched && <small className="watched-inline"> ★ 주목</small>}</span><b>{cafe.collected}</b><b>{cafe.passed}</b><div><i style={{ width: `${Math.round(cafe.passRate * 100)}%` }} /><em>{(cafe.passRate * 100).toFixed(1)}%</em></div><div>{watched ? <button onClick={() => void runWatchedAction("focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy) || !watched.active}>{busy === "watched-focus" ? "수집 중" : "이 카페 집중 수집"}</button> : <button onClick={() => prepareCafeRegistration(cafe)} disabled={Boolean(busy)}>주목 등록</button>}<button className="link-button" onClick={() => void runAction("cafe-to-industry", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>업종 번역으로 →</button></div></div>;
+        })}
         {!data.cafes.length && <div className="discovery-empty">표본 5건 이상인 네이버 카페가 없습니다.</div>}
       </div>
       <details className="insufficient-cafes">
@@ -778,6 +857,8 @@ function LogsView({ runs }: { runs: RunLog[] }) {
   const llm1PassRate = Number(run.stageCounts.llm1_pass_rate ?? 0);
   const previouslyUserRejected = Number(run.stageCounts.previouslyUserRejected ?? 0);
   const activeFilterExcluded = Number(run.stageCounts.activeFilterExcluded ?? 0);
+  const watchedCollected = Number(run.stageCounts.watchedCollected ?? 0);
+  const watchedLlm1Passed = Number(run.stageCounts.watchedLlm1Passed ?? 0);
   const rejectReasonCounts = (run.stageCounts.reject_reason_counts as Record<string, number> | undefined) ?? {};
   const rejectEntries = Object.entries(rejectReasonCounts).filter(([, value]) => Number(value) > 0);
   const sourceCounts = (run.stageCounts.source_counts as Record<string, number> | undefined) ?? {};
@@ -809,6 +890,7 @@ function LogsView({ runs }: { runs: RunLog[] }) {
         <div><span>정밀 검증</span><strong>{verified}</strong><small>자동·수동 합계</small></div>
       </div>
       {sourceEntries.length > 0 && <section className="reject-breakdown"><header><h3>소스별 실제 수집</h3><span>네이버 기본 목표 · 지식iN 35% / 블로그 30% / 카페 35%</span></header><div>{sourceEntries.map(([source, count]) => <span key={source}><b>{logSourceLabel[source] ?? source}</b>{count}</span>)}</div></section>}
+      {watchedCollected > 0 && <section className="reject-breakdown watched-run-summary"><header><h3>★ 주목 카페 별도 집계</h3><span>자동 실행 요약</span></header><div><span><b>URL 일치 수집</b>{watchedCollected}</span><span><b>1차 통과</b>{watchedLlm1Passed}</span><span><b>통과율</b>{((watchedLlm1Passed / watchedCollected) * 100).toFixed(1)}%</span></div></section>}
       {(previouslyUserRejected > 0 || activeFilterExcluded > 0) && <section className="reject-breakdown"><header><h3>사전 제외 영향</h3><span>이번 실행 기준</span></header><div><span><b>사용자 기각 재처리 차단</b>{previouslyUserRejected}</span><span><b>활성 필터 사전 제외</b>{activeFilterExcluded}</span></div></section>}
       {rejectEntries.length > 0 && <section className="reject-breakdown"><header><h3>1차 기각 사유</h3><span>{rejectEntries.reduce((sum, [, value]) => sum + Number(value), 0)}건</span></header><div>{rejectEntries.map(([reason, count]) => <span key={reason}><b>{logRejectLabel[reason] ?? reason}</b>{count}</span>)}</div></section>}
       <section className="error-log"><header><h3>실행 상태</h3></header><div><time>{endedAt ? endedAt.toLocaleTimeString("ko-KR") : startedAt.toLocaleTimeString("ko-KR")}</time><span className={run.status === "completed" ? "info-pill" : "warn-pill"}>{statusLabel}</span><p>{run.stoppedReason || run.errors[0] || "파이프라인 실행 기록이 정상적으로 저장되었습니다."}</p></div></section>

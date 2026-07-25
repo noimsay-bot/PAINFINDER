@@ -133,3 +133,30 @@ test("24시간 숨김·재처리 차단·사유 기반 필터 이력과 취소�
   assert.match(schema, /create table if not exists filter_additions/);
   assert.match(migration, /mode text not null check \(mode in \('auto','approved'\)\)/);
 });
+
+test("주목 카페 관리·조준 수집·원문 우대·자동 실행 슬롯을 코드에 고정한다", async () => {
+  const [page, dashboard, watchedRoute, watchedHelper, pipeline, automaticRun, schema, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/watched-cafes/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/watched-cafes.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/pipeline.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/run-execution.ts", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260725_watched_cafes.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /주목 카페만/);
+  assert.match(page, /가입한 카페 · 원문 열람 가능/);
+  assert.match(page, /원문 크게 보기/);
+  assert.match(page, /특정 카페만 검색할 수 없습니다/);
+  assert.match(watchedRoute, /body\.action === "focus"/);
+  assert.match(watchedRoute, /sources:\s*\{\s*naverCafe:\s*true\s*\}/);
+  assert.match(watchedHelper, /WATCHED_CAFE_QUERY_SLOTS = 4/);
+  assert.match(watchedHelper, /url\.searchParams\.get\("clubid"\)/);
+  assert.match(pipeline, /normalizeWatchedStage1Result/);
+  assert.match(pipeline, /Number\(b\.watched\) - Number\(a\.watched\)/);
+  assert.match(automaticRun, /AUTO_RUN_LIMITS\.MAX_QUERIES - watchedQueries\.length/);
+  assert.match(dashboard, /watchedCafeName/);
+  assert.match(schema, /create table if not exists watched_cafes/);
+  assert.match(migration, /alter table raw_items add column if not exists watched/);
+});

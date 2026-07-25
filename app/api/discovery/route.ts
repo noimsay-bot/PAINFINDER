@@ -3,6 +3,7 @@ import { isActiveIndustryCode, isSoftwareRelevantVocabulary, ksicSection, rankCa
 import { getLlmProvider, resolveLlmModel } from "@/lib/llm";
 import { KSIC_SEEDS } from "@/lib/ksic-seeds";
 import { supabaseRest } from "@/lib/pipeline";
+import { parseNaverCafeId } from "@/lib/watched-cafes";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -15,14 +16,7 @@ const STOPWORDS = new Set([
   "그리고", "그런데", "하지만", "때문에", "관련", "대한", "있는", "없는", "합니다", "입니다", "하는", "해서", "정도", "경우", "이번", "그냥", "요즘", "제가", "저는", "우리", "문의", "질문", "카페", "네이버",
 ]);
 
-function cafeIdFromUrl(raw: unknown) {
-  try {
-    const url = new URL(String(raw ?? ""));
-    if (!url.hostname.endsWith("cafe.naver.com")) return null;
-    const [cafeId] = url.pathname.split("/").filter(Boolean);
-    return cafeId && !cafeId.includes(".") ? decodeURIComponent(cafeId) : null;
-  } catch { return null; }
-}
+const cafeIdFromUrl = parseNaverCafeId;
 
 function usefulTokens(text: string) {
   return text.match(/[가-힣]{2,}|[A-Za-z][A-Za-z0-9._+-]{1,}/g)?.map(value => value.trim()).filter(value => !STOPWORDS.has(value) && !/^https?$/i.test(value)) ?? [];

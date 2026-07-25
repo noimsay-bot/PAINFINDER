@@ -1,5 +1,6 @@
 import { AUTO_RUN_LIMITS, MANUAL_RUN_LIMITS } from "./limits";
 import { supabaseRest, type RunConfig } from "./pipeline";
+import { buildWatchedCafeQueries, WATCHED_CAFE_QUERY_SLOTS, type WatchedCafe } from "./watched-cafes";
 
 type SeedRow = { query_text: string; origin?: string };
 
@@ -33,12 +34,26 @@ export async function resolveManualQueries(config: RunConfig) {
 }
 
 export async function resolveAutomaticQueries() {
+  const watchedRows = await supabaseRest(
+    "watched_cafes?active=eq.true&select=id,cafe_id,cafe_name,topic_seeds,active&order=id.asc",
+  ) as WatchedCafe[] | null;
+  const watchedQueries = buildWatchedCafeQueries((watchedRows ?? []).map(cafe => ({
+    ...cafe,
+    topic_seeds: Array.isArray(cafe.topic_seeds) ? cafe.topic_seeds.map(String) : [],
+  })), WATCHED_CAFE_QUERY_SLOTS);
+  const regularLimit = Math.max(0, AUTO_RUN_LIMITS.MAX_QUERIES - watchedQueries.length);
   const rows = await supabaseRest(
-    `seed_queries?active=eq.true&select=query_text,origin&order=last_used_at.asc.nullsfirst,id.asc&limit=${AUTO_RUN_LIMITS.MAX_QUERIES}`,
+    `seed_queries?active=eq.true&select=query_text,origin&order=last_used_at.asc.nullsfirst,id.asc&limit=${regularLimit}`,
   ) as SeedRow[] | null;
+  const regular = rows ?? [];
+  const queries = [...regular.map(row => row.query_text), ...watchedQueries.map(item => item.query)];
   return {
-    queries: (rows ?? []).map(row => row.query_text),
-    origins: Object.fromEntries((rows ?? []).map(row => [row.query_text, row.origin ?? "manual"])),
+    queries,
+    origins: Object.fromEntries([
+      ...regular.map(row => [row.query_text, row.origin ?? "manual"] as const),
+      ...watchedQueries.map(item => [item.query, `watched_cafe:${item.cafeId}`] as const),
+    ]),
+    watchedQueryCount: watchedQueries.length,
   };
 }
 

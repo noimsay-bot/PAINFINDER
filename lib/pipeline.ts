@@ -6,6 +6,7 @@ import { normalizeNaverPostdate, normalizeNaverText, searchNaver, type NaverSear
 import { detectPromotionalSignals } from "./promotional";
 import { classifyFinalRuleRejection, type RuleExclusion } from "./rule-filter";
 import { calculateFourScores, type BuyerContext, type FourScores } from "./scoring";
+import { matchWatchedCafe, type WatchedCafe } from "./watched-cafes";
 
 export type RunConfig = {
   id?: string;
@@ -65,10 +66,12 @@ type RawSignal = {
   promotional_rule_flagged: boolean;
   is_promotional: boolean;
   highlight_terms: string[];
+  watched: boolean;
+  watched_cafe_id: string | null;
 };
 
 export type RejectReason = "구직" | "구매문의" | "가격불만" | "신체" | "일회성" | "정보질문" | "학습" | "promotional" | "홍보" | "해결됨" | "기타";
-type Stage1 = { id: string; pass: boolean; is_promotional: boolean; type?: string; reason?: string; reject_reason?: RejectReason };
+type Stage1 = { id: string; pass: boolean; is_promotional: boolean; borderline?: boolean; type?: string; reason?: string; reject_reason?: RejectReason };
 type Analysis = {
   pain_summary: string;
   who: string;
@@ -124,7 +127,10 @@ export function allocateSourceTargets(
   return Object.fromEntries(allocations.map(item => [item.source, item.count])) as Partial<Record<NaverSearchType, number>>;
 }
 
-function enrichRawSignal(input: Omit<RawSignal, "body_length" | "low_confidence" | "promotional_signals" | "promotional_signal_score" | "promotional_rule_flagged" | "is_promotional">): RawSignal {
+function enrichRawSignal(
+  input: Omit<RawSignal, "body_length" | "low_confidence" | "promotional_signals" | "promotional_signal_score" | "promotional_rule_flagged" | "is_promotional" | "watched" | "watched_cafe_id">
+    & Partial<Pick<RawSignal, "watched" | "watched_cafe_id">>,
+): RawSignal {
   const promotional = detectPromotionalSignals(input);
   return {
     ...input,
@@ -134,6 +140,8 @@ function enrichRawSignal(input: Omit<RawSignal, "body_length" | "low_confidence"
     promotional_signal_score: promotional.score,
     promotional_rule_flagged: promotional.flagged,
     is_promotional: false,
+    watched: input.watched ?? false,
+    watched_cafe_id: input.watched_cafe_id ?? null,
   };
 }
 
@@ -175,7 +183,13 @@ function isJunk(item: RawSignal, excluded: string[]) {
   return false;
 }
 
-async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard) {
+async function collectNaver(
+  config: ReturnType<typeof normalizeConfig>,
+  queries: string[],
+  errors: string[],
+  canContinue: RunGuard,
+  watchedCafes: WatchedCafe[],
+) {
   const clientId = process.env.NAVER_CLIENT_ID;
   const clientSecret = process.env.NAVER_CLIENT_SECRET;
   if (!clientId || !clientSecret) return [] as RawSignal[];
@@ -196,6 +210,7 @@ async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries:
         for (const item of items.slice(0, remaining)) {
           const url = String(item.link ?? "");
           if (!url) continue;
+          const watchedCafe = type === "cafearticle" ? matchWatchedCafe(url, watchedCafes) : null;
           collected.push(enrichRawSignal({
             source: type,
             source_id: url,
@@ -209,6 +224,8 @@ async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries:
             source_name: item.cafename ? String(item.cafename) : item.bloggername ? String(item.bloggername) : null,
             author_name: item.bloggername ? String(item.bloggername) : null,
             highlight_terms: Array.isArray(item.highlight_terms) ? item.highlight_terms.map(String).filter(Boolean) : [],
+            watched: Boolean(watchedCafe),
+            watched_cafe_id: watchedCafe?.cafe_id ?? null,
           }));
         }
       } catch (error) { errors.push(`naver:${type}:${error instanceof Error ? error.message : "unknown"}`); }
@@ -309,6 +326,7 @@ type Stage1ModelResult = {
   type?: unknown;
   reason?: unknown;
   reject_reason?: unknown;
+  borderline?: unknown;
 };
 
 export function normalizeStage1Result(result: Stage1ModelResult | undefined, id: string): Stage1 {
@@ -319,6 +337,7 @@ export function normalizeStage1Result(result: Stage1ModelResult | undefined, id:
     id,
     pass,
     is_promotional: isPromotional,
+    ...(result?.borderline === true ? { borderline: true } : {}),
     type: pass ? String(result?.type ?? "기타") : undefined,
     reason: pass ? String(result?.reason ?? "반복 프로세스 문제") : undefined,
     reject_reason: pass
@@ -329,7 +348,25 @@ export function normalizeStage1Result(result: Stage1ModelResult | undefined, id:
   };
 }
 
-export function buildStage1Prompt(batch: Array<Pick<RawSignal, "source" | "title" | "body" | "promotional_signals" | "promotional_signal_score">>, offset = 0) {
+export function normalizeWatchedStage1Result(raw: Pick<RawSignal, "watched" | "low_confidence">, result: Stage1): Stage1 {
+  if (!raw.watched || result.pass || result.is_promotional) return result;
+  const hardRejects = new Set<RejectReason>(["구직", "구매문의", "promotional", "홍보"]);
+  if (hardRejects.has(result.reject_reason ?? "기타")) return result;
+  if (!raw.low_confidence && !result.borderline) return result;
+  return {
+    ...result,
+    pass: true,
+    is_promotional: false,
+    type: "원문 확인",
+    reason: raw.low_confidence ? "짧은 스니펫 · 가입한 카페 원문 확인 필요" : "경계선 후보 · 가입한 카페 원문 확인 필요",
+    reject_reason: undefined,
+  };
+}
+
+export function buildStage1Prompt(
+  batch: Array<Pick<RawSignal, "source" | "title" | "body" | "promotional_signals" | "promotional_signal_score"> & Partial<Pick<RawSignal, "watched" | "low_confidence">>>,
+  offset = 0,
+) {
   const inputs = batch.map((item, index) => ({
     id: String(offset + index),
     source: item.source,
@@ -337,6 +374,8 @@ export function buildStage1Prompt(batch: Array<Pick<RawSignal, "source" | "title
     body: item.body,
     rule_promotional_signals: item.promotional_signals,
     rule_promotional_score: item.promotional_signal_score,
+    watched_cafe: Boolean(item.watched),
+    snippet_too_short: Boolean(item.low_confidence),
     promotional_threshold_note: item.source === "blog"
       ? "블로그는 협찬·체험단 비율이 높으므로 약한 광고 단서도 엄격히 판정"
       : "룰 신호 하나만으로 광고 확정 금지; 문맥과 시제를 함께 판정",
@@ -351,9 +390,11 @@ export function buildStage1Prompt(batch: Array<Pick<RawSignal, "source" | "title
 핵심 판별: "문제 → 해결"로 끝나면 광고, "문제 → 물음표"로 끝나면 페인포인트다.
 rule_promotional_signals는 사전 룰이 찾은 참고 신호일 뿐 단독으로 탈락시키지 말고 전체 문맥을 판정하라. 단, blog 소스는 협찬 가능성이 높으므로 더 낮은 광고 임계값을 적용하라.
 
+watched_cafe=true인 글은 사용자가 가입한 카페의 원문을 직접 읽고 최종 판단한다. 명백한 광고·구직·단순구매는 똑같이 제외하되, 페인포인트일 가능성이 경계선이거나 짧은 스니펫 때문에 애매하면 pass=true로 사람에게 넘겨라. 애매한 결과에는 borderline=true를 넣는다. 다른 글은 borderline=false다.
+
 그 밖의 즉시 제외 범주: 구직·채용·이직·자기소개서·이력서·면접·일자리 배정, 단순 구매/배송/재고/소량·N개 단위 문의, 가격·수수료 불만, 신체·건강 문제, 일회성 환경 불만·고장·사고·분쟁·환불, 단순 정보 질문, 학습·강의·자격증, 판매·모집, 이미 답변으로 해결된 질문.
 각 결과에 is_promotional boolean을 반드시 넣는다. is_promotional=true이면 반드시 pass=false, reject_reason="promotional"로 쓴다.
-통과는 {"id":"...","pass":true,"is_promotional":false,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"is_promotional":false,"reject_reason":"구직|구매문의|가격불만|신체|일회성|정보질문|학습|promotional|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.
+통과는 {"id":"...","pass":true,"is_promotional":false,"borderline":false,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"is_promotional":false,"borderline":false,"reject_reason":"구직|구매문의|가격불만|신체|일회성|정보질문|학습|promotional|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.
 ${JSON.stringify(inputs)}`;
 }
 
@@ -393,9 +434,11 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   const errors: string[] = [];
   const queries = makeQueries(config);
   if (!queries.length) throw new Error("검색어를 1개 이상 입력해 주세요.");
+  const watchedCafeRows = await supabaseRest("watched_cafes?active=eq.true&select=id,cafe_id,cafe_name,topic_seeds,active&order=id.asc") as WatchedCafe[] | null;
+  const watchedCafes = (watchedCafeRows ?? []).map(cafe => ({ ...cafe, topic_seeds: Array.isArray(cafe.topic_seeds) ? cafe.topic_seeds.map(String) : [] }));
   const collected = canContinue()
     ? await Promise.all([
-      collectNaver(config, queries, errors, canContinue),
+      collectNaver(config, queries, errors, canContinue, watchedCafes),
       collectHn(config, queries, errors, canContinue),
       collectThreads(config, queries, errors, canContinue),
       collectAppReviews(config, errors, canContinue),
@@ -470,7 +513,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
       for (let i = 0; i < batch.length; i++) {
         const id = String(offset + i);
         const result = resultById.get(id);
-        const normalized = normalizeStage1Result(result, id);
+        const normalized = normalizeWatchedStage1Result(batch[i], normalizeStage1Result(result, id));
         batch[i].is_promotional = normalized.is_promotional;
         stage1.push(normalized);
       }
@@ -485,7 +528,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   const rejectReasonCounts = Object.fromEntries([...rejectReasons].map(reason => [reason, stage1.filter(result => !result.pass && result.reject_reason === reason).length]));
   const passedIndexes = stage1.filter(result => result.pass).map(result => Number(result.id)).filter(Number.isFinite);
   const passed = passedIndexes.map(index => filtered[index]).filter(Boolean)
-    .sort((a, b) => Number(["kin", "blog"].includes(b.source)) - Number(["kin", "blog"].includes(a.source)) || b.body_length - a.body_length)
+    .sort((a, b) => Number(b.watched) - Number(a.watched) || Number(["kin", "blog"].includes(b.source)) - Number(["kin", "blog"].includes(a.source)) || b.body_length - a.body_length)
     .slice(0, llm2MaxCalls);
   const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: ProductCompetitor[]; marketVerdict: MarketVerdict; scores: FourScores; precisionVerified: boolean }> = [];
   let llm2Calls = 0;
@@ -571,6 +614,9 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
     llm1_pass_rate: llm1PassRate,
     reject_reason_counts: rejectReasonCounts,
     promotional: rejectReasonCounts.promotional ?? 0,
+    watchedCollected: collectedUnique.filter(item => item.watched).length,
+    watchedLlm1Passed: stage1.filter(result => result.pass && filtered[Number(result.id)]?.watched).length,
+    watchedQueryCount: queries.filter(query => String(config.query_origins[query] ?? "").startsWith("watched_cafe:")).length,
     llm2Analyzed: analyses.length,
     appVerified: analyses.length,
     verified: verifiedItems,
