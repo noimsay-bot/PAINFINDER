@@ -161,6 +161,28 @@ test("주목 카페 관리·조준 수집·원문 우대·자동 실행 슬롯�
   assert.match(migration, /alter table raw_items add column if not exists watched/);
 });
 
+test("후보에서 주목 카페를 즉석 추가·해제하고 기존 후보에 소급 표시한다", async () => {
+  const [page, dashboard, watchedRoute, watchedHelper, cafeNames, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/watched-cafes/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/watched-cafes.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/cafe-names.ts", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260725_watched_cafe_candidate_origin.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /이 카페 주목하기/);
+  assert.match(page, /★ 주목 중/);
+  assert.match(page, /event\.key\.toLowerCase\(\) === "w"/);
+  assert.match(page, /주제어 설정 →/);
+  assert.match(watchedRoute, /body\.action === "quick_toggle"/);
+  assert.match(watchedRoute, /inferCafeSeeds/);
+  assert.match(watchedRoute, /origin: existing\?\.origin \?\? "candidate"/);
+  assert.match(watchedHelper, /inferWatchedCafeTopicSeeds/);
+  assert.match(cafeNames, /fetchNaverCafeName/);
+  assert.match(dashboard, /activeWatched\.get/);
+  assert.match(migration, /origin in \('manual', 'candidate'\)/);
+});
+
 test("상위 검토 큐·자동 정리·분야 보류·복원 경로를 코드에 고정한다", async () => {
   const [page, dashboard, decisions, queue, reviewSettings, pipeline, schema, migration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),

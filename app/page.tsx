@@ -11,6 +11,7 @@ import {
   type ReviewSettings,
   type ReviewStatus,
 } from "@/lib/review-queue";
+import { parseNaverCafeId } from "@/lib/watched-cafes";
 
 type View = "today" | "signals" | "discovery" | "settings" | "archive" | "logs";
 type Decision = "unreviewed" | "tracking" | "holding" | "rejected";
@@ -234,6 +235,8 @@ export default function Home() {
   const [dataError, setDataError] = useState("");
   const [setupRequired, setSetupRequired] = useState(false);
   const [verifyingId, setVerifyingId] = useState("");
+  const [watchingCandidateId, setWatchingCandidateId] = useState("");
+  const [watchToast, setWatchToast] = useState<{ message: string; active: boolean } | null>(null);
   const [visibilityNow, setVisibilityNow] = useState(() => Date.now());
 
   useEffect(() => { document.documentElement.dataset.theme = dark ? "dark" : "light"; }, [dark]);
@@ -344,6 +347,55 @@ export default function Home() {
     }
   }, [loadDashboard]);
 
+  const toggleCandidateCafe = useCallback(async () => {
+    if (!selected?.id || !selected.isCafe || watchingCandidateId) return;
+    setWatchingCandidateId(selected.id);
+    try {
+      const response = await fetch("/api/watched-cafes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "quick_toggle", painPointId: selected.id }),
+      });
+      const result = await response.json() as {
+        error?: string;
+        active?: boolean;
+        cafeId?: string;
+        cafeName?: string;
+        topicSeeds?: string[];
+      };
+      if (!response.ok || !result.cafeId) throw new Error(result.error ?? "카페 주목 상태를 바꾸지 못했습니다.");
+      const active = Boolean(result.active);
+      const normalizedCafeId = result.cafeId.toLocaleLowerCase("ko-KR");
+      setItems(current => current.map(item => {
+        const itemCafeId = item.isCafe ? parseNaverCafeId(item.url)?.toLocaleLowerCase("ko-KR") : null;
+        if (itemCafeId !== normalizedCafeId) return item;
+        return {
+          ...item,
+          watched: active,
+          watchedCafeId: active ? result.cafeId! : null,
+          watchedCafeName: active ? (result.cafeName ?? result.cafeId!) : item.sourceName,
+        };
+      }));
+      setWatchToast({
+        active,
+        message: active
+          ? `${result.cafeName ?? result.cafeId} 카페를 주목 목록에 추가했습니다`
+          : `${result.cafeName ?? result.cafeId} 카페 주목을 해제했습니다`,
+      });
+      setDataError("");
+    } catch (error) {
+      setDataError(error instanceof Error ? error.message : "카페 주목 상태를 바꾸지 못했습니다.");
+    } finally {
+      setWatchingCandidateId("");
+    }
+  }, [selected, watchingCandidateId]);
+
+  useEffect(() => {
+    if (!watchToast) return;
+    const timer = window.setTimeout(() => setWatchToast(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [watchToast]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (view !== "today" || ["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement).tagName)) return;
@@ -354,11 +406,12 @@ export default function Home() {
       if (event.key.toLowerCase() === "h") void decide("holding");
       if (event.key.toLowerCase() === "x") setRejecting(true);
       if (event.key.toLowerCase() === "v" && selected?.id) void verifyCandidate(selected.id);
+      if (event.key.toLowerCase() === "w" && selected?.isCafe) void toggleCandidateCafe();
       if (event.key === "Enter" && selected?.url) window.open(selected.url, "_blank", "noopener,noreferrer");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view, visible, selectedId, selected?.id, selected?.url, verifyCandidate, decide]);
+  }, [view, visible, selectedId, selected?.id, selected?.url, selected?.isCafe, verifyCandidate, toggleCandidateCafe, decide]);
 
   const titles: Record<View, [string, string]> = {
     today: ["오늘의 후보", "경쟁 검증을 통과한 신호부터 검토하세요."],
@@ -381,12 +434,12 @@ export default function Home() {
           <div className="meter"><i style={{ width: `${reviewSettings.queueSize ? Math.min(100, reviewQueue.queue.length / reviewSettings.queueSize * 100) : 0}%` }} /></div>
           <button onClick={() => setView("settings")}><span>▶</span> 지금 실행</button>
         </div>
-        <div className="shortcut-legend"><p>KEYBOARD</p><div><kbd>J</kbd><kbd>K</kbd><span>이동</span></div><div><kbd>T</kbd><span>추적</span><kbd>H</kbd><span>보류</span></div><div><kbd>X</kbd><span>기각</span><kbd>V</kbd><span>검증</span></div><div><kbd>↵</kbd><span>원문</span></div></div>
+        <div className="shortcut-legend"><p>KEYBOARD</p><div><kbd>J</kbd><kbd>K</kbd><span>이동</span></div><div><kbd>T</kbd><span>추적</span><kbd>H</kbd><span>보류</span></div><div><kbd>X</kbd><span>기각</span><kbd>V</kbd><span>검증</span></div><div><kbd>W</kbd><span>카페 주목</span><kbd>↵</kbd><span>원문</span></div></div>
       </aside>
 
       <section className="workspace">
         <Topbar title={titles[view][0]} subtitle={titles[view][1]} dark={dark} setDark={setDark} />
-        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} reviewQueue={reviewQueue} todayReviewedCount={todayReviewedCount} reviewSettings={reviewSettings} queueMode={queueMode} setQueueMode={setQueueMode} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} watchedOnly={watchedOnly} setWatchedOnly={setWatchedOnly} onDecision={decide} onHoldDomain={holdDomain} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
+        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} reviewQueue={reviewQueue} todayReviewedCount={todayReviewedCount} reviewSettings={reviewSettings} queueMode={queueMode} setQueueMode={setQueueMode} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} watchedOnly={watchedOnly} setWatchedOnly={setWatchedOnly} onDecision={decide} onHoldDomain={holdDomain} onToggleCafe={toggleCandidateCafe} watchingCandidateId={watchingCandidateId} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
         {view === "signals" && <SignalsView items={todayItems} onOpen={(id) => { setSelectedId(id); setView("today"); }} />}
         {view === "discovery" && <DiscoveryView onRunComplete={loadDashboard} />}
         {view === "settings" && <SettingsView onRunComplete={loadDashboard} />}
@@ -394,13 +447,15 @@ export default function Home() {
         {view === "logs" && <LogsView runs={logs} />}
       </section>
 
+      {watchToast && <div className="watch-toast" role="status"><span>{watchToast.active ? "★" : "☆"}</span><strong>{watchToast.message}</strong>{watchToast.active && <button onClick={() => { setView("discovery"); setWatchToast(null); }}>주제어 설정 →</button>}</div>}
+
       <nav className="mobile-nav" aria-label="모바일 메뉴">{NAV.map(n => <button key={n.id} onClick={() => setView(n.id)} className={view === n.id ? "active" : ""}><b>{n.mark}</b><span>{n.label.replace("오늘의 ", "")}</span></button>)}</nav>
     </main>
   );
 }
 
-function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCount, reviewSettings, queueMode, setQueueMode, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, watchedOnly, setWatchedOnly, onDecision, onHoldDomain, onVerify, verifyingId, rejecting, setRejecting, rejectCategory, setRejectCategory, rejectNote, setRejectNote }: {
-  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; reviewQueue: ReturnType<typeof buildReviewQueue<Candidate>>; todayReviewedCount: number; reviewSettings: ReviewSettings; queueMode: "queue" | "all"; setQueueMode: (mode: "queue" | "all") => void; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; watchedOnly: boolean; setWatchedOnly: (v: boolean) => void; onDecision: (d: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => Promise<void>; onHoldDomain: (domain: string) => Promise<void>; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectCategory: RejectionReasonCategory | ""; setRejectCategory: (v: RejectionReasonCategory | "") => void; rejectNote: string; setRejectNote: (v: string) => void;
+function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCount, reviewSettings, queueMode, setQueueMode, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, watchedOnly, setWatchedOnly, onDecision, onHoldDomain, onToggleCafe, watchingCandidateId, onVerify, verifyingId, rejecting, setRejecting, rejectCategory, setRejectCategory, rejectNote, setRejectNote }: {
+  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; reviewQueue: ReturnType<typeof buildReviewQueue<Candidate>>; todayReviewedCount: number; reviewSettings: ReviewSettings; queueMode: "queue" | "all"; setQueueMode: (mode: "queue" | "all") => void; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; watchedOnly: boolean; setWatchedOnly: (v: boolean) => void; onDecision: (d: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => Promise<void>; onHoldDomain: (domain: string) => Promise<void>; onToggleCafe: () => Promise<void>; watchingCandidateId: string; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectCategory: RejectionReasonCategory | ""; setRejectCategory: (v: RejectionReasonCategory | "") => void; rejectNote: string; setRejectNote: (v: string) => void;
 }) {
   return <div className="today-layout">
     <section className="candidate-pane">
@@ -438,7 +493,7 @@ function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCoun
         <div className="detail-kicker"><span className={`source-tag ${selected.sourceTone}`}>{selected.source}</span>{selected.watched && <span className="watched-access-badge">가입한 카페 · 원문 열람 가능</span>}{selected.sourceName && <span>{selected.sourceName}</span>}<span>{selected.time}</span><span>ID · PF-{String(selected.id).padStart(4, "0")}</span></div>
         <div className="detail-title"><div><h2>{selected.summary}</h2><p>{selected.who} · {selected.frequency} 발생</p></div><ScoreGauge score={selected.score} max={selected.scoreMax} /></div>
         <section className="detail-section original">
-          <header><h3>원문 스니펫 전문</h3><div className="original-links"><a href={selected.url} target="_blank" rel="noreferrer">원문 보기 ↗</a><a href={selected.naverSearchUrl} target="_blank" rel="noreferrer">네이버에서 검색 ↗</a></div></header>
+          <header><h3>원문 스니펫 전문</h3><div className="original-links">{selected.isCafe && <button className={`watch-cafe-action ${selected.watched ? "active" : ""}`} onClick={() => void onToggleCafe()} disabled={watchingCandidateId === selected.id} aria-pressed={selected.watched}><kbd>W</kbd>{watchingCandidateId === selected.id ? "처리 중…" : selected.watched ? "★ 주목 중" : "☆ 이 카페 주목하기"}</button>}<a href={selected.url} target="_blank" rel="noreferrer">원문 보기 ↗</a><a href={selected.naverSearchUrl} target="_blank" rel="noreferrer">네이버에서 검색 ↗</a></div></header>
           {selected.watched && <a className="watched-original-link" href={selected.url} target="_blank" rel="noreferrer"><span>가입한 카페에서 직접 판단하기</span><strong>원문 크게 보기 ↗</strong></a>}
           <div className="snippet-meta"><span>{selected.bodyLength}자</span>{selected.postedAt && <time>게시일 {new Date(selected.postedAt).toLocaleDateString("ko-KR")}</time>}{selected.isCafe && (selected.watched ? <span className="watched-access-badge">가입한 카페 · 원문 열람 가능</span> : <span className="join-warning">카페 가입이 필요할 수 있음</span>)}</div>
           {selected.isPromotional && <div className="promotion-warning"><strong>광고 의심</strong><span>자동 광고 판정 신호가 있어 사람이 다시 검토해야 합니다.</span></div>}
@@ -476,7 +531,7 @@ function SignalsView({ items, onOpen }: { items: Candidate[]; onOpen: (id: strin
 
 type DiscoveryItem = { id: number; origin: "cafe" | "text_mining" | "industry"; term: string; category: string; source_ref: string; frequency: number };
 type CafeStat = { cafeId: string; cafeName: string | null; collected: number; passed: number; passRate: number };
-type WatchedCafeStat = { id: number; cafeId: string; cafeName: string; topicSeeds: string[]; active: boolean; createdAt: string; collected: number; passed: number; tracked: number; trackingRate: number };
+type WatchedCafeStat = { id: number; cafeId: string; cafeName: string; topicSeeds: string[]; active: boolean; origin: "manual" | "candidate"; createdAt: string; collected: number; passed: number; tracked: number; trackingRate: number };
 type IndustryTranslation = { roles?: string[]; tools?: string[]; tasks?: string[] };
 type IndustrySeed = { id: number; ksic_code: string; ksic_name: string; section: string | null; active: boolean; note: string | null; done: boolean; translation: IndustryTranslation | null; translated_at: string | null };
 type DiscoveryData = { cafes: CafeStat[]; insufficientCafes: CafeStat[]; watchedCafes: WatchedCafeStat[]; discoveries: DiscoveryItem[]; industries: IndustrySeed[]; seeds: Array<{ id: number; query_text: string; origin: string; active: boolean; last_used_at: string | null }>; error?: string };
@@ -557,7 +612,7 @@ function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }
     finally { setBusy(""); }
   };
 
-  const runWatchedAction = async (action: "save" | "toggle" | "focus", extra: Record<string, unknown> = {}) => {
+  const runWatchedAction = async (action: "save" | "toggle" | "focus" | "delete", extra: Record<string, unknown> = {}) => {
     if (busy) return;
     setBusy(`watched-${action}`); setMessage("");
     try {
@@ -573,6 +628,7 @@ function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }
         setWatchedCafeId("");
       }
       if (action === "toggle") setMessage("활성 상태를 변경했습니다.");
+      if (action === "delete") setMessage("주목 목록에서 삭제했습니다. 기존 후보와 수집 기록은 그대로 보존됩니다.");
       if (action === "focus") {
         const watchedCount = Number(result.stageCounts?.watchedCollected ?? 0);
         setMessage(`조준 수집 완료 · 주목 카페 일치 ${watchedCount}건 · 새 후보 ${result.savedCandidates ?? 0}건`);
@@ -649,10 +705,10 @@ function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }
         <p className="watched-explainer">집중 수집은 “이 카페만 검색”이 아니라, 등록한 주제어로 넓게 검색해 이 카페 글을 우선 표시하는 방식입니다.</p>
         <div className="watched-cafe-list">
           {data.watchedCafes.map(cafe => <article className={!cafe.active ? "inactive" : ""} key={cafe.id}>
-            <div><span className="watched-access-badge">{cafe.active ? "활성" : "비활성"}</span><strong>{cafe.cafeName}</strong><code>{cafe.cafeId}</code></div>
+            <div><span className="watched-access-badge">{cafe.active ? "활성" : "비활성"}</span><strong>{cafe.cafeName}</strong><code>{cafe.cafeId}</code>{cafe.origin === "candidate" && <small className="candidate-origin-badge">후보에서 추가됨</small>}</div>
             <p>{cafe.topicSeeds.join(" · ")}</p>
             <dl><div><dt>수집</dt><dd>{cafe.collected}</dd></div><div><dt>1차 통과</dt><dd>{cafe.passed}</dd></div><div><dt>추적</dt><dd>{cafe.tracked}</dd></div><div><dt>추적률</dt><dd>{(cafe.trackingRate * 100).toFixed(1)}%</dd></div></dl>
-            <footer><button onClick={() => editWatchedCafe(cafe)} disabled={Boolean(busy)}>편집</button><button onClick={() => void runWatchedAction("toggle", { id: cafe.id, active: !cafe.active })} disabled={Boolean(busy)}>{cafe.active ? "비활성화" : "활성화"}</button><button className="focus-run-button" onClick={() => void runWatchedAction("focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy) || !cafe.active}>{busy === "watched-focus" ? "수집 중…" : "이 카페 집중 수집"}</button></footer>
+            <footer><button onClick={() => editWatchedCafe(cafe)} disabled={Boolean(busy)}>편집</button><button onClick={() => void runWatchedAction("toggle", { id: cafe.id, active: !cafe.active })} disabled={Boolean(busy)}>{cafe.active ? "비활성화" : "활성화"}</button><button className="watched-delete-button" onClick={() => { if (window.confirm(`“${cafe.cafeName}”을 주목 목록에서 삭제할까요?\n기존 후보와 수집 기록은 삭제되지 않습니다.`)) void runWatchedAction("delete", { id: cafe.id }); }} disabled={Boolean(busy)}>삭제</button><button className="focus-run-button" onClick={() => void runWatchedAction("focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy) || !cafe.active}>{busy === "watched-focus" ? "수집 중…" : "이 카페 집중 수집"}</button></footer>
           </article>)}
           {!data.watchedCafes.length && <div className="discovery-empty">아직 등록된 주목 카페가 없습니다. 위에 카페 ID를 입력해 시작하세요.</div>}
         </div>

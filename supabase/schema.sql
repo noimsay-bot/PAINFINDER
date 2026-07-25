@@ -154,6 +154,7 @@ create table if not exists watched_cafes (
   cafe_name text not null,
   topic_seeds jsonb not null default '[]'::jsonb,
   active boolean not null default true,
+  origin text not null default 'manual' check (origin in ('manual','candidate')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
