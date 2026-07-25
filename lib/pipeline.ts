@@ -357,6 +357,27 @@ rule_promotional_signals는 사전 룰이 찾은 참고 신호일 뿐 단독으�
 ${JSON.stringify(inputs)}`;
 }
 
+export function excludePreviouslyRejectedByUser<T extends { source: string; source_id: string }>(
+  items: T[],
+  rejectedRows: Array<{ source: string; source_id: string }>,
+) {
+  const rejectedKeys = new Set(rejectedRows.map(row => `${row.source}\u0000${row.source_id}`));
+  const kept = items.filter(item => !rejectedKeys.has(`${item.source}\u0000${item.source_id}`));
+  return { kept, excluded: items.length - kept.length };
+}
+
+export function excludeByActiveKeywordFilters<T extends { title: string; body: string }>(
+  items: T[],
+  exclusions: RuleExclusion[],
+) {
+  const keywords = exclusions.filter(item => item.kind === "keyword").map(item => item.value.trim().toLocaleLowerCase("ko-KR")).filter(Boolean);
+  const kept = items.filter(item => {
+    const text = `${item.title} ${item.body}`.toLocaleLowerCase("ko-KR");
+    return !keywords.some(keyword => text.includes(keyword));
+  });
+  return { kept, excluded: items.length - kept.length };
+}
+
 export async function runPipeline(input: RunConfig, options: RunPipelineOptions = {}) {
   const config = normalizeConfig(input);
   const startedAt = new Date().toISOString();
@@ -380,8 +401,16 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
       collectAppReviews(config, errors, canContinue),
     ]).then(parts => parts.flat())
     : [];
-  const deduped = [...new Map(collected.map(item => [`${item.source}:${item.source_id}`, item])).values()];
-  const filtered = deduped.filter(item => !isJunk(item, config.excluded_domains));
+  const collectedUnique = [...new Map(collected.map(item => [`${item.source}:${item.source_id}`, item])).values()];
+  const [rejectedRows, activeExclusionRows] = await Promise.all([
+    supabaseRest("raw_items?status=eq.rejected_by_user&select=source,source_id&limit=10000") as Promise<Array<{ source: string; source_id: string }> | null>,
+    supabaseRest("rule_exclusions?active=eq.true&select=kind,value&limit=1000") as Promise<RuleExclusion[] | null>,
+  ]);
+  const rejectedGuard = excludePreviouslyRejectedByUser(collectedUnique, rejectedRows ?? []);
+  const deduped = rejectedGuard.kept;
+  const junkFiltered = deduped.filter(item => !isJunk(item, config.excluded_domains));
+  const activeFilterGuard = excludeByActiveKeywordFilters(junkFiltered, activeExclusionRows ?? []);
+  const filtered = activeFilterGuard.kept;
   const llm = getLlmProvider();
   const stage1Model = resolveLlmModel(config.model_stage1, "stage1");
   const stage2Model = resolveLlmModel(config.model_stage2, "stage2");
@@ -532,8 +561,10 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   await Promise.all(Array.from({ length: Math.min(3, autoTargets.length) }, () => verifyWorker()));
 
   const stageCounts = {
-    collected: deduped.length,
-    source_counts: Object.fromEntries([...new Set(deduped.map(item => item.source))].map(source => [source, deduped.filter(item => item.source === source).length])),
+    collected: collectedUnique.length,
+    source_counts: Object.fromEntries([...new Set(collectedUnique.map(item => item.source))].map(source => [source, collectedUnique.filter(item => item.source === source).length])),
+    previouslyUserRejected: rejectedGuard.excluded,
+    activeFilterExcluded: activeFilterGuard.excluded,
     rulePassed: filtered.length,
     llm1Evaluated: stage1.length,
     llm1Passed: stage1PassCount,

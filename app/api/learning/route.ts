@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { LEARNING_MIN_EVIDENCE, REJECTION_REASON_LABELS, type RejectionReasonCategory } from "@/lib/learning";
+import { LEARNING_MIN_EVIDENCE, rejectionReasonLabel } from "@/lib/learning";
 import { supabaseRest } from "@/lib/pipeline";
+import { addActiveFilter, revokeFilterAddition } from "@/lib/filter-additions";
 
 type Row = Record<string, unknown>;
 
@@ -17,9 +18,10 @@ function countBy(values: string[]) {
 
 export async function GET() {
   try {
-    const [suggestions, exclusions, decisionRows, painRows] = await Promise.all([
+    const [suggestions, exclusions, filterAdditions, decisionRows, painRows] = await Promise.all([
       supabaseRest("learning_suggestions?select=id,suggestion_type,value,evidence_count,status,created_at,source_pain_point_id&order=evidence_count.desc,created_at.desc&limit=500") as Promise<Row[] | null>,
       supabaseRest("rule_exclusions?select=id,kind,value,source,active,created_at&order=created_at.desc&limit=500") as Promise<Row[] | null>,
+      supabaseRest("filter_additions?select=id,keyword,kind,source_reason,mode,origin_pain_point_id,added_at,active,revoked_at&order=added_at.desc&limit=500") as Promise<Row[] | null>,
       supabaseRest("decisions?select=id,pain_point_id,action,reason_category,reason_note,decided_at&order=decided_at.desc&limit=5000") as Promise<Row[] | null>,
       supabaseRest("pain_points?select=id,domain,scores(total,verdict),raw_items(query_origin)&limit=5000") as Promise<Row[] | null>,
     ]);
@@ -34,8 +36,7 @@ export async function GET() {
     const reasonDistribution = countBy(decisions
       .filter(row => row.action === "rejected")
       .map(row => {
-        const category = String(row.reason_category ?? "") as RejectionReasonCategory;
-        return REJECTION_REASON_LABELS[category] ?? "미분류";
+        return rejectionReasonLabel(row.reason_category) ?? "미분류";
       }));
 
     const painById = new Map((painRows ?? []).map(row => [String(row.id), row]));
@@ -65,6 +66,7 @@ export async function GET() {
       minEvidence: LEARNING_MIN_EVIDENCE,
       suggestions: suggestions ?? [],
       exclusions: exclusions ?? [],
+      filterAdditions: filterAdditions ?? [],
       stats: {
         decisionCounts,
         reasonDistribution,
@@ -84,23 +86,27 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { action?: string; ids?: number[] };
+    const body = await request.json() as { action?: string; ids?: number[]; filterAdditionId?: number };
+    if (body.action === "revoke-filter") {
+      const id = Number(body.filterAdditionId);
+      if (!Number.isFinite(id)) return NextResponse.json({ error: "취소할 필터가 없습니다." }, { status: 400 });
+      return NextResponse.json({ revoked: await revokeFilterAddition(id) });
+    }
     if (body.action !== "approve") return NextResponse.json({ error: "지원하지 않는 작업입니다." }, { status: 400 });
     const ids = [...new Set((body.ids ?? []).map(Number).filter(Number.isFinite))].slice(0, 100);
     if (!ids.length) return NextResponse.json({ approved: 0 });
-    const rows = await supabaseRest(`learning_suggestions?id=in.(${ids.join(",")})&status=eq.pending&evidence_count=gte.${LEARNING_MIN_EVIDENCE}&suggestion_type=in.(keyword,promotional_keyword,domain)&select=id,suggestion_type,value`) as Row[] | null;
+    const rows = await supabaseRest(`learning_suggestions?id=in.(${ids.join(",")})&status=eq.pending&evidence_count=gte.${LEARNING_MIN_EVIDENCE}&suggestion_type=in.(keyword,promotional_keyword,domain)&select=id,suggestion_type,value,source_pain_point_id`) as Row[] | null;
     const approvedRows = rows ?? [];
     if (approvedRows.length) {
-      await supabaseRest("rule_exclusions?on_conflict=kind,value", {
-        method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates" },
-        body: JSON.stringify(approvedRows.map(row => ({
-          kind: row.suggestion_type === "promotional_keyword" ? "keyword" : row.suggestion_type,
-          value: String(row.value),
-          source: "decision_learning",
-          active: true,
-        }))),
-      });
+      for (const row of approvedRows) {
+        await addActiveFilter({
+          keyword: String(row.value),
+          kind: row.suggestion_type === "domain" ? "domain" : "keyword",
+          sourceReason: String(row.suggestion_type),
+          mode: "approved",
+          originPainPointId: row.source_pain_point_id ? String(row.source_pain_point_id) : null,
+        });
+      }
       await supabaseRest(`learning_suggestions?id=in.(${approvedRows.map(row => Number(row.id)).join(",")})`, {
         method: "PATCH",
         body: JSON.stringify({ status: "approved", reviewed_at: new Date().toISOString() }),

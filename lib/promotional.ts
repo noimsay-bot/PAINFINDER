@@ -41,6 +41,26 @@ export function extractPromotionalProductNames(text: string) {
   return [...new Set(names)].slice(0, 5);
 }
 
+const PROMOTIONAL_INDUCEMENT_PATTERNS = [
+  /링크는?\s*프로필/gi,
+  /프로필\s*링크/gi,
+  /댓글\s*문의/gi,
+  /무료\s*체험/gi,
+  /상담\s*신청/gi,
+  /할인\s*코드/gi,
+  /오픈\s*채팅/gi,
+  /디엠\s*주세요/gi,
+] as const;
+
+export function extractPromotionalExclusionTerms(text: string) {
+  const products = extractPromotionalProductNames(text);
+  const inducements = PROMOTIONAL_INDUCEMENT_PATTERNS.flatMap(pattern => {
+    pattern.lastIndex = 0;
+    return text.match(pattern) ?? [];
+  }).map(value => value.replace(/\s+/g, " ").trim());
+  return [...new Set([...products, ...inducements])].filter(value => value.length > 2).slice(0, 8);
+}
+
 export function detectPromotionalSignals(input: PromotionalSignalInput): PromotionalSignalResult {
   const text = `${input.title} ${input.body}`.replace(/\s+/g, " ").trim();
   const matched = SIGNAL_RULES.filter(rule => rule.pattern.test(text));
@@ -54,4 +74,3 @@ export function detectPromotionalSignals(input: PromotionalSignalInput): Promoti
     flagged: score >= threshold,
   };
 }
-

@@ -70,6 +70,34 @@ const SUGGESTION_STOPWORDS = new Set([
   "사용", "업무", "작업", "관리", "불편", "어려움", "사람", "경우", "현재", "이번",
 ]);
 
+const AUTO_EXCLUSION_STOPWORDS = new Set([
+  ...SUGGESTION_STOPWORDS,
+  "회사", "직장", "직원", "고객", "사용자", "데이터", "시스템", "서비스", "프로그램", "솔루션",
+  "도구", "기능", "처리", "과정", "상황", "내용", "정리", "반복", "수기", "엑셀", "요약",
+  "페인포인트", "후보", "광고", "홍보", "후기", "추천", "해결",
+]);
+
+export function isSafeAutoExclusionTerm(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim().toLocaleLowerCase("ko-KR");
+  if (normalized.length <= 2 || normalized.length > 40) return false;
+  if (AUTO_EXCLUSION_STOPWORDS.has(normalized)) return false;
+  if (/^(?:관리|업무|작업|회사|문제|불편|사용|방법|서비스|시스템)(?:(?:은|는|이|가|을|를|와|과|도|만|에서|으로|지만|인데)|하다|하는|입니다|해요)?$/i.test(normalized)) return false;
+  if (/(?:했습니다|입니다|합니다|있어요|없어요|했어요|되나요|인가요)$/.test(normalized)) return false;
+  return true;
+}
+
+export function extractSafeAutoExclusionTerms(text: string) {
+  const knownMatches = SUGGESTION_PATTERNS.flatMap(pattern => {
+    pattern.lastIndex = 0;
+    return text.match(pattern) ?? [];
+  });
+  const distinctive = text.match(/[가-힣A-Za-z][가-힣A-Za-z0-9·_-]{3,19}/g) ?? [];
+  return [...new Set([...knownMatches, ...distinctive]
+    .map(value => value.replace(/\s+/g, " ").trim())
+    .filter(isSafeAutoExclusionTerm))]
+    .slice(0, 6);
+}
+
 export function extractRuleSuggestionTerms(text: string) {
   const knownMatches = SUGGESTION_PATTERNS.flatMap(pattern => text.match(pattern) ?? []);
   const nounLike = text.match(/[가-힣A-Za-z][가-힣A-Za-z0-9·_-]{2,14}/g) ?? [];

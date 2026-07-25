@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { supabaseRest } from "@/lib/pipeline";
 import type { MarketVerdict } from "@/lib/competitors";
-import { REJECTION_REASON_LABELS, type RejectionReasonCategory } from "@/lib/learning";
+import { rejectionReasonLabel, normalizeRejectionReasonCategory } from "@/lib/learning";
+import { isRecentlyRejected, shouldHideRejectedFromToday } from "@/lib/candidate-visibility";
 
 type Row = Record<string, unknown>;
 
@@ -64,9 +65,11 @@ export async function GET() {
       const precisionVerified = Boolean(row.precision_verified_at);
       const incumbentScore = score.f4 === null || score.f4 === undefined ? null : Number(score.f4);
       const storedTotal = Number(score.total ?? 0);
-      const reasonCategory = String(latest.reason_category ?? "") as RejectionReasonCategory;
-      const reasonLabel = REJECTION_REASON_LABELS[reasonCategory] ?? String(latest.reason ?? "");
+      const reasonCategory = normalizeRejectionReasonCategory(latest.reason_category);
+      const reasonLabel = rejectionReasonLabel(reasonCategory) ?? String(latest.reason ?? "");
       const reasonNote = String(latest.reason_note ?? "").trim();
+      const decision = String(latest.action ?? "unreviewed");
+      const decidedAt = latest.decided_at ? String(latest.decided_at) : null;
       const originalTitle = String(raw.title ?? "");
       const bodyLength = Number(raw.body_length ?? String(raw.body ?? "").length);
       return {
@@ -84,10 +87,12 @@ export async function GET() {
         marketVerdict: precisionVerified ? marketVerdict(score.verdict) : "unverified",
         precisionVerified,
         precisionVerifiedAt: row.precision_verified_at ? String(row.precision_verified_at) : null,
-        decision: String(latest.action ?? "unreviewed"),
+        decision,
         decisionReason: reasonLabel ? `${reasonLabel}${reasonNote ? ` · ${reasonNote}` : ""}` : null,
         decisionReasonCategory: reasonCategory || null,
-        decidedAt: latest.decided_at ? String(latest.decided_at) : null,
+        decidedAt,
+        hiddenFromToday: shouldHideRejectedFromToday(decision, decidedAt),
+        recentlyRejected: isRecentlyRejected(decision, decidedAt),
         domain: String(row.domain ?? "미분류"),
         frequency: ({ daily: "매일", weekly: "매주", monthly: "매월", occasional: "비정기" } as Record<string, string>)[String(row.frequency)] ?? "빈도 미상",
         signal: String(row.signal_type ?? "LLM 통과"),
@@ -122,6 +127,8 @@ export async function GET() {
       };
     }).filter(candidate => !candidate.ruleRejected)
       .sort((a, b) =>
+        Number(a.hiddenFromToday) - Number(b.hiddenFromToday)
+        ||
         Number(b.precisionVerified) - Number(a.precisionVerified)
         || b.score - a.score
         || Number(["kin", "blog"].includes(b.sourceTone)) - Number(["kin", "blog"].includes(a.sourceTone))

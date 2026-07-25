@@ -72,7 +72,7 @@ test("시장 포화 교정과 승인형 거부 학습 경로를 코드에 고정
   assert.match(dashboard, /marketPriority\(b\.marketVerdict\) - marketPriority\(a\.marketVerdict\)/);
   assert.match(decisions, /reason_category:\s*reasonCategory/);
   assert.match(learning, /evidence_count=gte\.\$\{LEARNING_MIN_EVIDENCE\}/);
-  assert.match(learning, /rule_exclusions\?on_conflict=kind,value/);
+  assert.match(learning, /addActiveFilter/);
   assert.match(ruleFilter, /classifyFinalRuleRejection/);
   assert.match(migration, /alter table learning_suggestions enable row level security/);
   assert.match(migration, /when paid_count >= 5 or product_count >= 5 then 'crowded'/);
@@ -97,8 +97,39 @@ test("광고 판정·소스 비중·스니펫 신뢰도와 대체 링크를 코�
   assert.match(page, /판단 재료 부족/);
   assert.match(page, /카페 가입이 필요할 수 있음/);
   assert.match(dashboard, /b\.bodyLength - a\.bodyLength/);
-  assert.match(decisions, /extractPromotionalProductNames/);
+  assert.match(decisions, /extractPromotionalExclusionTerms/);
   assert.match(learning, /promotional_keyword/);
   assert.match(schema, /raw_payload jsonb/);
   assert.match(migration, /update raw_items[\s\S]*low_confidence = char_length\(body\) < 40/);
+});
+
+test("24시간 숨김·재처리 차단·사유 기반 필터 이력과 취소를 코드에 고정한다", async () => {
+  const [page, dashboard, decisions, learning, pipeline, visibility, filters, schema, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/decisions/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/learning/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/pipeline.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/candidate-visibility.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/filter-additions.ts", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260725_rejection_filter_history.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(visibility, /24 \* 60 \* 60 \* 1000/);
+  assert.match(dashboard, /hiddenFromToday:\s*shouldHideRejectedFromToday/);
+  assert.match(page, /todayItems[\s\S]*shouldHideRejectedFromToday/);
+  assert.match(page, /recently-rejected/);
+  assert.match(page, /const archived = items\.filter/);
+  assert.match(decisions, /status: body\.action === "rejected" \? "rejected_by_user" : "analyzed"/);
+  assert.match(pipeline, /status=eq\.rejected_by_user/);
+  assert.match(pipeline, /excludeByActiveKeywordFilters/);
+  assert.match(decisions, /reasonCategory === "not_painpoint"/);
+  assert.match(decisions, /reasonCategory === "out_of_interest"/);
+  assert.doesNotMatch(decisions, /reasonCategory === "already_solved"/);
+  assert.match(learning, /body\.action === "revoke-filter"/);
+  assert.match(filters, /revoked_at: new Date\(\)\.toISOString\(\)/);
+  assert.match(page, /자동 반영됨/);
+  assert.match(page, /반영 취소/);
+  assert.match(schema, /create table if not exists filter_additions/);
+  assert.match(migration, /mode text not null check \(mode in \('auto','approved'\)\)/);
 });
