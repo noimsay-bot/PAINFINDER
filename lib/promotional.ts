@@ -65,7 +65,7 @@ export function detectPromotionalSignals(input: PromotionalSignalInput): Promoti
   const text = `${input.title} ${input.body}`.replace(/\s+/g, " ").trim();
   const matched = SIGNAL_RULES.filter(rule => rule.pattern.test(text));
   const score = matched.reduce((sum, rule) => sum + rule.weight, 0);
-  const threshold = input.source === "blog" ? 2 : 3;
+  const threshold = input.source === "blog" || input.source === "cafearticle" ? 2 : 3;
   return {
     signals: matched.map(rule => rule.label),
     productCandidates: extractPromotionalProductNames(text),

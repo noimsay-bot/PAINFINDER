@@ -119,8 +119,8 @@ test("24시간 숨김·재처리 차단·사유 기반 필터 이력과 취소�
   assert.match(dashboard, /hiddenFromToday:\s*shouldHideRejectedFromToday/);
   assert.match(page, /todayItems[\s\S]*shouldHideRejectedFromToday/);
   assert.match(page, /recently-rejected/);
-  assert.match(page, /const archived = items\.filter/);
-  assert.match(decisions, /status: body\.action === "rejected" \? "rejected_by_user" : "analyzed"/);
+  assert.match(page, /const archived = \[\.\.\.userArchived, \.\.\.autoHeld\]/);
+  assert.match(decisions, /body\.action === "rejected" \? "rejected_by_user" : "analyzed"/);
   assert.match(pipeline, /status=eq\.rejected_by_user/);
   assert.match(pipeline, /excludeByActiveKeywordFilters/);
   assert.match(decisions, /reasonCategory === "not_painpoint"/);
@@ -159,4 +159,35 @@ test("주목 카페 관리·조준 수집·원문 우대·자동 실행 슬롯�
   assert.match(dashboard, /watchedCafeName/);
   assert.match(schema, /create table if not exists watched_cafes/);
   assert.match(migration, /alter table raw_items add column if not exists watched/);
+});
+
+test("상위 검토 큐·자동 정리·분야 보류·복원 경로를 코드에 고정한다", async () => {
+  const [page, dashboard, decisions, queue, reviewSettings, pipeline, schema, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/decisions/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/review-queue.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/review-settings/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/pipeline.ts", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260725_review_queue.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /오늘의 검토 큐/);
+  assert.match(page, /오늘 볼 \{reviewSettings\.queueSize\}개/);
+  assert.match(page, /전체 보기 \{allItems\.length\}/);
+  assert.match(page, /자동 정리/);
+  assert.match(page, /이 분야 전체 보류/);
+  assert.match(page, /검토 큐 최소 점수/);
+  assert.match(queue, /DEFAULT_REVIEW_QUEUE_SIZE = 10/);
+  assert.match(queue, /MAX_CONSECUTIVE_QUEUE_DOMAIN = 2/);
+  assert.match(queue, /mergeSimilarCandidates/);
+  assert.match(queue, /marketVerdict === "all_free"/);
+  assert.match(decisions, /body\.action === "hold_domain"/);
+  assert.match(decisions, /review_override: true/);
+  assert.match(reviewSettings, /syncAutomaticStatuses/);
+  assert.match(dashboard, /reviewSettings/);
+  assert.match(pipeline, /reviewQueueAdded/);
+  assert.match(pipeline, /digestTop3/);
+  assert.match(schema, /create table if not exists review_settings/);
+  assert.match(migration, /review_status in \('eligible', 'auto_held', 'insufficient_signal'\)/);
 });

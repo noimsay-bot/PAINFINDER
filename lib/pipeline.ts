@@ -7,6 +7,7 @@ import { detectPromotionalSignals } from "./promotional";
 import { classifyFinalRuleRejection, type RuleExclusion } from "./rule-filter";
 import { calculateFourScores, type BuyerContext, type FourScores } from "./scoring";
 import { matchWatchedCafe, type WatchedCafe } from "./watched-cafes";
+import { DEFAULT_REVIEW_QUEUE_MIN_SCORE, mergeSimilarCandidates, reviewStatusFor } from "./review-queue";
 
 export type RunConfig = {
   id?: string;
@@ -649,8 +650,13 @@ export async function supabaseRest(path: string, init: RequestInit = {}) {
 }
 
 export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>) {
-  const exclusionRows = await supabaseRest("rule_exclusions?active=eq.true&select=kind,value&limit=1000") as Array<{ kind: string; value: string }> | null;
+  const [exclusionRows, reviewSettingRows] = await Promise.all([
+    supabaseRest("rule_exclusions?active=eq.true&select=kind,value&limit=1000") as Promise<Array<{ kind: string; value: string }> | null>,
+    supabaseRest("review_settings?id=eq.1&select=min_score&limit=1")
+      .catch(() => null) as Promise<Array<{ min_score: number }> | null>,
+  ]);
   const exclusions = (exclusionRows ?? []).filter((row): row is RuleExclusion => ["keyword", "domain"].includes(row.kind) && Boolean(row.value));
+  const reviewMinScore = Number(reviewSettingRows?.[0]?.min_score ?? DEFAULT_REVIEW_QUEUE_MIN_SCORE);
   const finalRejectByKey = new Map<string, string>();
   const rawKey = (source: string, sourceId: string) => `${source}\u0000${sourceId}`;
   const acceptedCandidates = result.candidates.filter(candidate => {
@@ -663,7 +669,21 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
     if (reason) finalRejectByKey.set(rawKey(candidate.raw.source, candidate.raw.source_id), reason);
     return !reason;
   });
-  const stageCounts = { ...result.stageCounts, finalRuleRejected: finalRejectByKey.size };
+  const queueEligible = acceptedCandidates
+    .filter(candidate => !reviewStatusFor({
+      score: candidate.scores.total,
+      marketVerdict: candidate.marketVerdict,
+      lowConfidence: candidate.raw.low_confidence,
+      reviewOverride: false,
+    }, reviewMinScore).reason)
+    .sort((a, b) => b.scores.total - a.scores.total);
+  const stageCounts = {
+    ...result.stageCounts,
+    finalRuleRejected: finalRejectByKey.size,
+    reviewQueueAdded: queueEligible.length,
+    paidOpportunityCount: queueEligible.filter(candidate => candidate.marketVerdict === "paid_exists").length,
+    digestTop3: queueEligible.slice(0, 3).map(candidate => candidate.analysis.pain_summary),
+  };
   const created = await supabaseRest("run_logs", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ config_id: result.config.id ?? null, started_at: result.startedAt, ended_at: result.endedAt, stage_counts: stageCounts, llm_calls: result.llmCalls, cost_estimate: result.costEstimate, stopped_reason: result.stoppedReason, errors: result.errors }) }) as Array<{ id: string }> | null;
   const runId = created?.[0]?.id;
   if (!runId) return { runId: null, savedCandidates: 0, savedCompetitors: 0, finalRuleRejected: finalRejectByKey.size };
@@ -679,11 +699,20 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
   }
   for (const candidate of result.candidates) {
     const finalRejectReason = finalRejectByKey.get(rawKey(candidate.raw.source, candidate.raw.source_id));
+    const review = reviewStatusFor({
+      score: candidate.scores.total,
+      marketVerdict: candidate.marketVerdict,
+      lowConfidence: candidate.raw.low_confidence,
+      reviewOverride: false,
+    }, reviewMinScore);
     rawByKey.set(rawKey(candidate.raw.source, candidate.raw.source_id), {
       ...candidate.raw,
       run_id: runId,
       status: finalRejectReason ? "rule_rejected" : "analyzed",
       reject_reason: finalRejectReason ?? null,
+      review_status: review.status,
+      review_status_reason: review.reason,
+      review_status_updated_at: new Date().toISOString(),
     });
   }
 
@@ -733,6 +762,29 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
     : [];
 
   const painIdByRawId = new Map((painRows ?? []).map(row => [row.raw_item_id, row.id]));
+  const similarityGroups = mergeSimilarCandidates([...painIdByRawId.entries()].map(([rawId, painId]) => {
+    const candidate = candidateByRawId.get(rawId)!;
+    return {
+      id: painId,
+      summary: candidate.analysis.pain_summary,
+      who: candidate.analysis.who,
+      domain: candidate.analysis.domain,
+      score: candidate.scores.total,
+      marketVerdict: candidate.marketVerdict,
+      lowConfidence: candidate.raw.low_confidence,
+      watched: candidate.raw.watched,
+      decision: "unreviewed",
+      recurrence: 1,
+      bodyLength: candidate.raw.body_length,
+    };
+  }));
+  for (const group of similarityGroups.filter(item => item.duplicateCount > 0)) {
+    const painIds = [group.id, ...group.duplicateIds];
+    await supabaseRest(`pain_points?id=in.(${painIds.join(",")})`, {
+      method: "PATCH",
+      body: JSON.stringify({ cluster_id: group.id, recurrence_count: group.recurrence }),
+    });
+  }
   const scoreRows = [...painIdByRawId.entries()].map(([rawId, painId]) => {
     const candidate = candidateByRawId.get(rawId)!;
     return {

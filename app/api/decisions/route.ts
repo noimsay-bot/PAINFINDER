@@ -32,7 +32,39 @@ async function addLearningSuggestion(type: LearningSuggestionType, value: string
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { painPointId?: string; action?: string; reasonCategory?: string; reasonNote?: string };
+    const body = await request.json() as { painPointId?: string; action?: string; reasonCategory?: string; reasonNote?: string; domain?: string };
+    if (body.action === "hold_domain") {
+      const domain = String(body.domain ?? "").trim().slice(0, 120);
+      if (!domain) return NextResponse.json({ error: "보류할 분야가 없습니다." }, { status: 400 });
+      const rows = await supabaseRest(
+        `pain_points?domain=eq.${encodeURIComponent(domain)}&select=id,raw_item_id,decisions(action,decided_at)&limit=500`,
+      ) as Row[] | null;
+      const targets = (rows ?? []).filter(row => {
+        const decisions = Array.isArray(row.decisions) ? [...row.decisions] as Row[] : [];
+        decisions.sort((a, b) => String(b.decided_at ?? "").localeCompare(String(a.decided_at ?? "")));
+        return String(decisions[0]?.action ?? "unreviewed") === "unreviewed";
+      });
+      if (!targets.length) return NextResponse.json({ heldCount: 0, domain });
+      const decidedAt = new Date().toISOString();
+      await supabaseRest("decisions", {
+        method: "POST",
+        body: JSON.stringify(targets.map(row => ({
+          pain_point_id: row.id,
+          action: "holding",
+          reason: `사용자 선택 · ${domain} 분야 전체 보류`,
+          reason_note: `${domain} 분야 전체 보류`,
+          decided_at: decidedAt,
+        }))),
+      });
+      const rawIds = targets.map(row => String(row.raw_item_id ?? "")).filter(Boolean);
+      if (rawIds.length) {
+        await supabaseRest(`raw_items?id=in.(${rawIds.join(",")})`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "analyzed" }),
+        });
+      }
+      return NextResponse.json({ heldCount: targets.length, domain });
+    }
     if (!body.painPointId || !["tracking", "holding", "rejected", "unreviewed"].includes(body.action ?? "")) return NextResponse.json({ error: "Invalid decision" }, { status: 400 });
     const normalizedCategory = normalizeRejectionReasonCategory(body.reasonCategory);
     if (body.action === "rejected" && !normalizedCategory) return NextResponse.json({ error: "기각 사유를 선택해 주세요." }, { status: 400 });
@@ -53,7 +85,15 @@ export async function POST(request: Request) {
     if (rawItemId) {
       await supabaseRest(`raw_items?id=eq.${encodeURIComponent(rawItemId)}`, {
         method: "PATCH",
-        body: JSON.stringify({ status: body.action === "rejected" ? "rejected_by_user" : "analyzed" }),
+        body: JSON.stringify(body.action === "unreviewed"
+          ? {
+              status: "analyzed",
+              review_status: "eligible",
+              review_status_reason: null,
+              review_override: true,
+              review_status_updated_at: new Date().toISOString(),
+            }
+          : { status: body.action === "rejected" ? "rejected_by_user" : "analyzed" }),
       });
     }
 

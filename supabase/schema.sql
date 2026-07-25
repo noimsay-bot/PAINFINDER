@@ -43,6 +43,17 @@ create table if not exists run_logs (
   errors jsonb not null default '[]'::jsonb
 );
 
+create table if not exists review_settings (
+  id smallint primary key default 1 check (id = 1),
+  queue_size integer not null default 10 check (queue_size between 5 and 30),
+  min_score integer not null default 5 check (min_score between 0 and 10),
+  updated_at timestamptz not null default now()
+);
+
+insert into review_settings (id, queue_size, min_score)
+values (1, 10, 5)
+on conflict (id) do nothing;
+
 create table if not exists raw_items (
   id uuid primary key default gen_random_uuid(),
   source text not null,
@@ -66,6 +77,10 @@ create table if not exists raw_items (
   promotional_rule_flagged boolean not null default false,
   is_promotional boolean not null default false,
   highlight_terms jsonb not null default '[]'::jsonb,
+  review_status text not null default 'eligible' check (review_status in ('eligible','auto_held','insufficient_signal')),
+  review_status_reason text,
+  review_override boolean not null default false,
+  review_status_updated_at timestamptz,
   run_id uuid references run_logs(id) on delete set null,
   unique(source, source_id)
 );
@@ -207,6 +222,7 @@ alter table learning_suggestions enable row level security;
 alter table rule_exclusions enable row level security;
 alter table filter_additions enable row level security;
 alter table watched_cafes enable row level security;
+alter table review_settings enable row level security;
 
 create index if not exists pain_points_cluster_idx on pain_points(cluster_id);
 create index if not exists pain_points_recurrence_idx on pain_points(recurrence_count desc);
@@ -218,6 +234,7 @@ create index if not exists filter_additions_active_idx on filter_additions(activ
 create index if not exists filter_additions_origin_idx on filter_additions(origin_pain_point_id, added_at desc);
 create index if not exists watched_cafes_active_idx on watched_cafes(active, created_at);
 create index if not exists raw_items_watched_idx on raw_items(watched, watched_cafe_id, collected_at desc);
+create index if not exists raw_items_review_status_idx on raw_items(review_status, review_override, collected_at desc);
 create index if not exists query_discoveries_pending_idx on query_discoveries(origin, approved_at, frequency desc);
 create index if not exists industry_seeds_round_robin_idx on industry_seeds(done, created_at, id);
 create index if not exists industry_seeds_active_section_idx on industry_seeds(active, section, done, ksic_code);

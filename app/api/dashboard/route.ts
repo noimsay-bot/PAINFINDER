@@ -3,6 +3,7 @@ import { supabaseRest } from "@/lib/pipeline";
 import type { MarketVerdict } from "@/lib/competitors";
 import { rejectionReasonLabel, normalizeRejectionReasonCategory } from "@/lib/learning";
 import { isRecentlyRejected, shouldHideRejectedFromToday } from "@/lib/candidate-visibility";
+import { compactPainSummary, DEFAULT_REVIEW_QUEUE_MIN_SCORE, DEFAULT_REVIEW_QUEUE_SIZE } from "@/lib/review-queue";
 
 type Row = Record<string, unknown>;
 
@@ -40,10 +41,11 @@ function marketPriority(verdict: MarketVerdict) {
 
 export async function GET() {
   try {
-    const [painRows, logRows] = await Promise.all([
-      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
+    const [painRows, logRows, reviewSettingRows] = await Promise.all([
+      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
       supabaseRest("run_logs?select=id,started_at,ended_at,stage_counts,llm_calls,cost_estimate,stopped_reason,errors,run_configs(name)&order=started_at.desc&limit=50"),
-    ]) as [Row[] | null, Row[] | null];
+      supabaseRest("review_settings?id=eq.1&select=queue_size,min_score&limit=1"),
+    ]) as [Row[] | null, Row[] | null, Row[] | null];
 
     const candidates = (painRows ?? []).map((row) => {
       const raw = one(row.raw_items);
@@ -73,10 +75,13 @@ export async function GET() {
       const originalTitle = String(raw.title ?? "");
       const bodyLength = Number(raw.body_length ?? String(raw.body ?? "").length);
       const watchedCafe = one(raw.watched_cafes);
+      const who = String(row.who ?? "대상 미분류");
+      const summary = String(row.pain_summary ?? "요약 없음");
       return {
         id: String(row.id),
-        summary: String(row.pain_summary ?? "요약 없음"),
-        who: String(row.who ?? "대상 미분류"),
+        summary,
+        compactSummary: compactPainSummary(who, summary),
+        who,
         source: sourceLabel(source),
         sourceTone: sourceTone(source),
         time: relativeTime(raw.posted_at ?? row.created_at),
@@ -110,6 +115,9 @@ export async function GET() {
         watched: Boolean(raw.watched),
         watchedCafeId: raw.watched_cafe_id ? String(raw.watched_cafe_id) : null,
         watchedCafeName: watchedCafe.cafe_name ? String(watchedCafe.cafe_name) : raw.source_name ? String(raw.source_name) : null,
+        reviewStatus: String(raw.review_status ?? "eligible"),
+        reviewReason: raw.review_status_reason ? String(raw.review_status_reason) : null,
+        reviewOverride: Boolean(raw.review_override),
         authorName: raw.author_name ? String(raw.author_name) : null,
         isCafe: source === "cafearticle",
         naverSearchUrl: `https://search.naver.com/search.naver?query=${encodeURIComponent(originalTitle)}`,
@@ -156,7 +164,15 @@ export async function GET() {
       errors: Array.isArray(row.errors) ? row.errors.map(String) : [],
     }));
 
-    return NextResponse.json({ candidates, logs });
+    const reviewRow = reviewSettingRows?.[0] ?? {};
+    return NextResponse.json({
+      candidates,
+      logs,
+      reviewSettings: {
+        queueSize: Number(reviewRow.queue_size ?? DEFAULT_REVIEW_QUEUE_SIZE),
+        minScore: Number(reviewRow.min_score ?? DEFAULT_REVIEW_QUEUE_MIN_SCORE),
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "데이터를 불러오지 못했습니다.";
     const setupRequired = message.includes("PGRST205") || message.includes("Could not find the table");
