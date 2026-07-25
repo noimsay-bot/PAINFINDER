@@ -12,6 +12,7 @@ create table if not exists run_configs (
   domains jsonb not null default '[]'::jsonb,
   excluded_domains jsonb not null default '["연예","정치","스포츠"]'::jsonb,
   sources jsonb not null default '{}'::jsonb,
+  source_weights jsonb not null default '{"kin":35,"blog":30,"cafearticle":35,"webkr":0}'::jsonb,
   period_days integer not null default 7,
   auto_verify_top_n integer not null default 10 check (auto_verify_top_n between 0 and 40),
   app_list jsonb not null default '[]'::jsonb,
@@ -55,6 +56,16 @@ create table if not exists raw_items (
   reject_reason text,
   query_text text,
   query_origin text,
+  raw_payload jsonb,
+  source_name text,
+  author_name text,
+  body_length integer not null default 0 check (body_length >= 0),
+  low_confidence boolean not null default false,
+  promotional_signals jsonb not null default '[]'::jsonb,
+  promotional_signal_score integer not null default 0 check (promotional_signal_score >= 0),
+  promotional_rule_flagged boolean not null default false,
+  is_promotional boolean not null default false,
+  highlight_terms jsonb not null default '[]'::jsonb,
   run_id uuid references run_logs(id) on delete set null,
   unique(source, source_id)
 );
@@ -146,7 +157,7 @@ create table if not exists decisions (
 
 create table if not exists learning_suggestions (
   id bigint generated always as identity primary key,
-  suggestion_type text not null check (suggestion_type in ('keyword','domain','prompt_example')),
+  suggestion_type text not null check (suggestion_type in ('keyword','promotional_keyword','domain','prompt_example')),
   value text not null,
   source_pain_point_id uuid references pain_points(id) on delete set null,
   evidence_count integer not null default 1 check (evidence_count >= 1),

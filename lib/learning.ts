@@ -1,4 +1,5 @@
 export const REJECTION_REASON_LABELS = {
+  promotional: "광고·홍보",
   solved: "이미 해결됨",
   not_pain: "페인포인트 아님",
   small_market: "시장이 너무 작음",
@@ -9,7 +10,7 @@ export const REJECTION_REASON_LABELS = {
 } as const;
 
 export type RejectionReasonCategory = keyof typeof REJECTION_REASON_LABELS;
-export type LearningSuggestionType = "keyword" | "domain" | "prompt_example";
+export type LearningSuggestionType = "keyword" | "promotional_keyword" | "domain" | "prompt_example";
 
 export const LEARNING_MIN_EVIDENCE = 2;
 

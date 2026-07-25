@@ -88,14 +88,14 @@ export async function POST(request: Request) {
     if (body.action !== "approve") return NextResponse.json({ error: "지원하지 않는 작업입니다." }, { status: 400 });
     const ids = [...new Set((body.ids ?? []).map(Number).filter(Number.isFinite))].slice(0, 100);
     if (!ids.length) return NextResponse.json({ approved: 0 });
-    const rows = await supabaseRest(`learning_suggestions?id=in.(${ids.join(",")})&status=eq.pending&evidence_count=gte.${LEARNING_MIN_EVIDENCE}&suggestion_type=in.(keyword,domain)&select=id,suggestion_type,value`) as Row[] | null;
+    const rows = await supabaseRest(`learning_suggestions?id=in.(${ids.join(",")})&status=eq.pending&evidence_count=gte.${LEARNING_MIN_EVIDENCE}&suggestion_type=in.(keyword,promotional_keyword,domain)&select=id,suggestion_type,value`) as Row[] | null;
     const approvedRows = rows ?? [];
     if (approvedRows.length) {
       await supabaseRest("rule_exclusions?on_conflict=kind,value", {
         method: "POST",
         headers: { Prefer: "resolution=merge-duplicates" },
         body: JSON.stringify(approvedRows.map(row => ({
-          kind: row.suggestion_type,
+          kind: row.suggestion_type === "promotional_keyword" ? "keyword" : row.suggestion_type,
           value: String(row.value),
           source: "decision_learning",
           active: true,

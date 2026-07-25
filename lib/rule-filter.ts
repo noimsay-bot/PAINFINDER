@@ -1,4 +1,4 @@
-export type FinalRejectReason = "구직" | "구매문의" | "신체" | "일회성" | "정보질문" | "학습" | "홍보" | "해결됨" | "제외키워드" | "제외도메인";
+export type FinalRejectReason = "구직" | "구매문의" | "신체" | "일회성" | "정보질문" | "학습" | "제외키워드" | "제외도메인";
 
 export type RuleExclusion = {
   kind: "keyword" | "domain";
@@ -32,14 +32,6 @@ const BUILTIN_RULES: Array<{ reason: FinalRejectReason; pattern: RegExp }> = [
   {
     reason: "학습",
     pattern: /자격증|합격\s*수기|강의\s*(후기|수강)|과제\s*(제출|제작)|공부\s*(방법|시작)|시험\s*(준비|공부)/i,
-  },
-  {
-    reason: "홍보",
-    pattern: /오픈채팅|무료\s*상담|문의\s*(주세요|바랍니다)|신청\s*링크|프로필\s*링크|공동구매\s*모집|판매합니다|홍보합니다/i,
-  },
-  {
-    reason: "해결됨",
-    pattern: /이미\s*해결|해결됐|해결되었|답변.{0,20}해결|문제없이\s*사용\s*중/i,
   },
   {
     reason: "정보질문",

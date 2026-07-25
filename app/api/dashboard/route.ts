@@ -40,7 +40,7 @@ function marketPriority(verdict: MarketVerdict) {
 export async function GET() {
   try {
     const [painRows, logRows] = await Promise.all([
-      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
+      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
       supabaseRest("run_logs?select=id,started_at,ended_at,stage_counts,llm_calls,cost_estimate,stopped_reason,errors,run_configs(name)&order=started_at.desc&limit=50"),
     ]) as [Row[] | null, Row[] | null];
 
@@ -67,6 +67,8 @@ export async function GET() {
       const reasonCategory = String(latest.reason_category ?? "") as RejectionReasonCategory;
       const reasonLabel = REJECTION_REASON_LABELS[reasonCategory] ?? String(latest.reason ?? "");
       const reasonNote = String(latest.reason_note ?? "").trim();
+      const originalTitle = String(raw.title ?? "");
+      const bodyLength = Number(raw.body_length ?? String(raw.body ?? "").length);
       return {
         id: String(row.id),
         summary: String(row.pain_summary ?? "요약 없음"),
@@ -74,6 +76,7 @@ export async function GET() {
         source: sourceLabel(source),
         sourceTone: sourceTone(source),
         time: relativeTime(raw.posted_at ?? row.created_at),
+        postedAt: raw.posted_at ? String(raw.posted_at) : null,
         score: precisionVerified ? storedTotal : Math.max(0, storedTotal - (incumbentScore ?? 0)),
         scoreMax: precisionVerified ? (legacyScore ? 12 : 10) : (legacyScore ? 9 : 7),
         competitors: rivals.length,
@@ -89,6 +92,18 @@ export async function GET() {
         frequency: ({ daily: "매일", weekly: "매주", monthly: "매월", occasional: "비정기" } as Record<string, string>)[String(row.frequency)] ?? "빈도 미상",
         signal: String(row.signal_type ?? "LLM 통과"),
         excerpt: String(raw.body ?? raw.title ?? "원문 없음"),
+        originalTitle,
+        bodyLength,
+        lowConfidence: raw.low_confidence === undefined ? bodyLength < 40 : Boolean(raw.low_confidence),
+        isPromotional: Boolean(raw.is_promotional),
+        promotionalSignals: Array.isArray(raw.promotional_signals) ? raw.promotional_signals.map(String) : [],
+        promotionalSignalScore: Number(raw.promotional_signal_score ?? 0),
+        promotionalRuleFlagged: Boolean(raw.promotional_rule_flagged),
+        highlightTerms: Array.isArray(raw.highlight_terms) ? raw.highlight_terms.map(String) : [],
+        sourceName: raw.source_name ? String(raw.source_name) : null,
+        authorName: raw.author_name ? String(raw.author_name) : null,
+        isCafe: source === "cafearticle",
+        naverSearchUrl: `https://search.naver.com/search.naver?query=${encodeURIComponent(originalTitle)}`,
         workaround: String(row.current_workaround ?? "확인되지 않음"),
         money: row.money_signal ? String(row.money_signal) : null,
         recurrence: Number(row.recurrence_count ?? 1),
@@ -109,6 +124,8 @@ export async function GET() {
       .sort((a, b) =>
         Number(b.precisionVerified) - Number(a.precisionVerified)
         || b.score - a.score
+        || Number(["kin", "blog"].includes(b.sourceTone)) - Number(["kin", "blog"].includes(a.sourceTone))
+        || b.bodyLength - a.bodyLength
         || marketPriority(b.marketVerdict) - marketPriority(a.marketVerdict)
         || b.createdAt.localeCompare(a.createdAt)
       );

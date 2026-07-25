@@ -77,3 +77,28 @@ test("시장 포화 교정과 승인형 거부 학습 경로를 코드에 고정
   assert.match(migration, /alter table learning_suggestions enable row level security/);
   assert.match(migration, /when paid_count >= 5 or product_count >= 5 then 'crowded'/);
 });
+
+test("광고 판정·소스 비중·스니펫 신뢰도와 대체 링크를 코드에 고정한다", async () => {
+  const [page, dashboard, pipeline, decisions, learning, schema, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/pipeline.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/decisions/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/learning/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260725_promotional_snippet_sources.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(pipeline, /is_promotional=true이면 반드시 pass=false/);
+  assert.match(pipeline, /promotional:\s*rejectReasonCounts\.promotional/);
+  assert.match(pipeline, /kin:\s*35[\s\S]*blog:\s*30[\s\S]*cafearticle:\s*35/);
+  assert.match(pipeline, /source_counts/);
+  assert.match(page, /원문 스니펫 전문/);
+  assert.match(page, /네이버에서 검색/);
+  assert.match(page, /판단 재료 부족/);
+  assert.match(page, /카페 가입이 필요할 수 있음/);
+  assert.match(dashboard, /b\.bodyLength - a\.bodyLength/);
+  assert.match(decisions, /extractPromotionalProductNames/);
+  assert.match(learning, /promotional_keyword/);
+  assert.match(schema, /raw_payload jsonb/);
+  assert.match(migration, /update raw_items[\s\S]*low_confidence = char_length\(body\) < 40/);
+});

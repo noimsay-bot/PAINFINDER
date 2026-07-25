@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { isRejectionReasonCategory, REJECTION_REASON_LABELS, type LearningSuggestionType } from "@/lib/learning";
 import { supabaseRest } from "@/lib/pipeline";
 import { extractRuleSuggestionTerms } from "@/lib/rule-filter";
+import { extractPromotionalProductNames } from "@/lib/promotional";
 
 type Row = Record<string, unknown>;
 
@@ -50,6 +51,12 @@ export async function POST(request: Request) {
       if (reasonCategory === "not_pain") {
         const text = `${reasonNote ?? ""} ${String(raw.title ?? "")} ${String(raw.body ?? "")} ${String(pain.pain_summary ?? "")}`;
         for (const term of extractRuleSuggestionTerms(text)) await addLearningSuggestion("keyword", term, body.painPointId);
+      }
+      if (reasonCategory === "promotional") {
+        const text = `${String(raw.title ?? "")} ${String(raw.body ?? "")}`;
+        for (const productName of extractPromotionalProductNames(text)) {
+          await addLearningSuggestion("promotional_keyword", productName, body.painPointId);
+        }
       }
       if (reasonCategory === "out_of_scope") await addLearningSuggestion("domain", String(pain.domain ?? ""), body.painPointId);
       if (reasonCategory === "inaccurate_summary") {

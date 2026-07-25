@@ -10,14 +10,14 @@ export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  const imageUrl = `${protocol}://${host}/og-discovery.png`;
+  const imageUrl = `${protocol}://${host}/og-promotional-signals.png`;
   const title = "Painfinder — 페인포인트 검증 콘솔";
   const description = "이미 풀린 아이디어를 걷어내고, 아직 남은 기회만 찾는 개인용 리서치 콘솔";
   return {
     title,
     description,
     icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
-    openGraph: { title, description, type: "website", locale: "ko_KR", images: [{ url: imageUrl, width: 1734, height: 907, alt: "Painfinder — signals before solutions" }] },
+    openGraph: { title, description, type: "website", locale: "ko_KR", images: [{ url: imageUrl, width: 1536, height: 1024, alt: "Painfinder — 광고를 걷어내고 아직 남은 문제를 찾는 리서치 콘솔" }] },
     twitter: { card: "summary_large_image", title, description, images: [imageUrl] },
   };
 }

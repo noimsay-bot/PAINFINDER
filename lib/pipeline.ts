@@ -2,7 +2,8 @@ import { DEFAULT_LIMITS, HARD_LIMITS, RUN_TIME_BUDGET, hasRunProcessingBudget } 
 import { classifyMarket, createAppMarketSearchContext, mergeProducts, searchAppMarket, verifyMarket, type MarketVerdict, type ProductCompetitor, type VerificationCounts } from "./competitors";
 import { getLlmProvider, LlmProviderError, resolveLlmModel, type LlmResult } from "./llm";
 import { calculateLlmCost } from "./llm/pricing";
-import { normalizeNaverText, searchNaver, type NaverSearchType } from "./naver";
+import { normalizeNaverPostdate, normalizeNaverText, searchNaver, type NaverSearchType } from "./naver";
+import { detectPromotionalSignals } from "./promotional";
 import { classifyFinalRuleRejection, type RuleExclusion } from "./rule-filter";
 import { calculateFourScores, type BuyerContext, type FourScores } from "./scoring";
 
@@ -19,6 +20,7 @@ export type RunConfig = {
   domains?: string[];
   excluded_domains?: string[];
   sources?: Record<string, boolean>;
+  source_weights?: Partial<Record<NaverSearchType, number>>;
   period_days?: number;
   auto_verify_top_n?: number;
   app_list?: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
@@ -37,6 +39,7 @@ type NormalizedRunConfig = {
   query_origins: Record<string, string>;
   excluded_domains: string[];
   sources: Record<string, boolean>;
+  source_weights: Record<NaverSearchType, number>;
   period_days: number;
   auto_verify_top_n: number;
   app_list: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
@@ -52,10 +55,20 @@ type RawSignal = {
   posted_at: string | null;
   query_text: string | null;
   query_origin: string | null;
+  raw_payload: Record<string, unknown> | null;
+  source_name: string | null;
+  author_name: string | null;
+  body_length: number;
+  low_confidence: boolean;
+  promotional_signals: string[];
+  promotional_signal_score: number;
+  promotional_rule_flagged: boolean;
+  is_promotional: boolean;
+  highlight_terms: string[];
 };
 
-export type RejectReason = "구직" | "구매문의" | "가격불만" | "신체" | "일회성" | "정보질문" | "학습" | "홍보" | "해결됨" | "기타";
-type Stage1 = { id: string; pass: boolean; type?: string; reason?: string; reject_reason?: RejectReason };
+export type RejectReason = "구직" | "구매문의" | "가격불만" | "신체" | "일회성" | "정보질문" | "학습" | "promotional" | "홍보" | "해결됨" | "기타";
+type Stage1 = { id: string; pass: boolean; is_promotional: boolean; type?: string; reason?: string; reject_reason?: RejectReason };
 type Analysis = {
   pain_summary: string;
   who: string;
@@ -82,6 +95,48 @@ const SOURCE_MAP: Record<string, NaverSearchType> = {
   "네이버카페": "cafearticle", "지식iN": "kin", "블로그": "blog", "웹문서": "webkr",
 };
 
+export const DEFAULT_SOURCE_WEIGHTS: Record<NaverSearchType, number> = {
+  kin: 35,
+  blog: 30,
+  cafearticle: 35,
+  webkr: 0,
+};
+
+export function allocateSourceTargets(
+  total: number,
+  enabledSources: NaverSearchType[],
+  weights: Partial<Record<NaverSearchType, number>> = DEFAULT_SOURCE_WEIGHTS,
+) {
+  const sources = [...new Set(enabledSources)];
+  const positive = sources.map(source => ({ source, weight: Math.max(0, Number(weights[source] ?? DEFAULT_SOURCE_WEIGHTS[source] ?? 0)) }));
+  const weightTotal = positive.reduce((sum, item) => sum + item.weight, 0);
+  const effective = weightTotal > 0 ? positive : positive.map(item => ({ ...item, weight: 1 }));
+  const effectiveTotal = effective.reduce((sum, item) => sum + item.weight, 0);
+  const allocations = effective.map(item => {
+    const exact = total * item.weight / effectiveTotal;
+    return { ...item, count: Math.floor(exact), remainder: exact - Math.floor(exact) };
+  });
+  let remaining = Math.max(0, total - allocations.reduce((sum, item) => sum + item.count, 0));
+  for (const item of [...allocations].sort((a, b) => b.remainder - a.remainder || a.source.localeCompare(b.source))) {
+    if (remaining-- <= 0) break;
+    item.count++;
+  }
+  return Object.fromEntries(allocations.map(item => [item.source, item.count])) as Partial<Record<NaverSearchType, number>>;
+}
+
+function enrichRawSignal(input: Omit<RawSignal, "body_length" | "low_confidence" | "promotional_signals" | "promotional_signal_score" | "promotional_rule_flagged" | "is_promotional">): RawSignal {
+  const promotional = detectPromotionalSignals(input);
+  return {
+    ...input,
+    body_length: input.body.length,
+    low_confidence: input.body.length < 40,
+    promotional_signals: promotional.signals,
+    promotional_signal_score: promotional.score,
+    promotional_rule_flagged: promotional.flagged,
+    is_promotional: false,
+  };
+}
+
 export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
   const queries = Math.min(Math.max(input.limits?.queries ?? DEFAULT_LIMITS.QUERIES_PER_RUN, 1), HARD_LIMITS.QUERIES_PER_RUN);
   const itemsPerSource = Math.min(Math.max(input.limits?.itemsPerSource ?? DEFAULT_LIMITS.ITEMS_PER_SOURCE.naver, 1), HARD_LIMITS.ITEMS_PER_SOURCE);
@@ -98,6 +153,10 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
     query_origins: input.query_origins ?? {},
     excluded_domains: input.excluded_domains ?? ["연예", "정치", "스포츠"],
     sources: input.sources ?? { naverCafe: true, naverKin: true, naverBlog: true, appstore: true },
+    source_weights: {
+      ...DEFAULT_SOURCE_WEIGHTS,
+      ...(input.source_weights ?? {}),
+    },
     period_days: Math.min(Math.max(input.period_days ?? 7, 1), 365),
     auto_verify_top_n: Math.min(Math.max(input.auto_verify_top_n ?? 10, 0), DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN),
     app_list: input.app_list ?? [],
@@ -111,10 +170,8 @@ function makeQueries(config: ReturnType<typeof normalizeConfig>) {
 
 function isJunk(item: RawSignal, excluded: string[]) {
   const text = `${item.title} ${item.body}`.trim();
-  if (text.length < 30) return true;
+  if (text.length < 10) return true;
   if (excluded.some(word => text.includes(word))) return true;
-  if (/(문의\s*(주세요|바랍니다)|상담|무료체험\s*신청|오픈채팅|open\.kakao|\d{2,3}-\d{3,4}-\d{4})/i.test(text)) return true;
-  if (/\d{1,3}(,\d{3})*\s*원/.test(text) && /(구매|주문|판매|특가|할인)/.test(text)) return true;
   return false;
 }
 
@@ -122,23 +179,37 @@ async function collectNaver(config: ReturnType<typeof normalizeConfig>, queries:
   const clientId = process.env.NAVER_CLIENT_ID;
   const clientSecret = process.env.NAVER_CLIENT_SECRET;
   if (!clientId || !clientSecret) return [] as RawSignal[];
-  const enabled = Object.entries(config.sources).filter(([key, enabled]) => enabled && SOURCE_MAP[key]);
+  const enabled = [...new Set(Object.entries(config.sources).filter(([key, enabled]) => enabled && SOURCE_MAP[key]).map(([key]) => SOURCE_MAP[key]))];
+  const targets = allocateSourceTargets(config.limits.itemsPerSource, enabled, config.source_weights);
   const collected: RawSignal[] = [];
-  for (const [key] of enabled) {
+  for (const type of enabled) {
     if (!canContinue()) break;
-    const type = SOURCE_MAP[key];
+    const target = targets[type] ?? 0;
     for (const query of queries) {
       if (!canContinue()) break;
       const sourceCount = collected.filter(i => i.source === type).length;
-      const remaining = config.limits.itemsPerSource - sourceCount;
+      const remaining = target - sourceCount;
       if (remaining <= 0) break;
       try {
-        const fairShare = Math.max(1, Math.ceil(config.limits.itemsPerSource / queries.length));
+        const fairShare = Math.max(1, Math.ceil(target / queries.length));
         const items = await searchNaver({ type, query, display: Math.min(100, fairShare, remaining), sort: "date", clientId, clientSecret });
         for (const item of items.slice(0, remaining)) {
           const url = String(item.link ?? "");
           if (!url) continue;
-          collected.push({ source: type, source_id: url, url, title: String(item.title ?? ""), body: String(item.description ?? ""), posted_at: item.postdate ? String(item.postdate) : null, query_text: query, query_origin: config.query_origins[query] ?? "manual" });
+          collected.push(enrichRawSignal({
+            source: type,
+            source_id: url,
+            url,
+            title: String(item.title ?? ""),
+            body: String(item.description ?? ""),
+            posted_at: normalizeNaverPostdate(item.postdate),
+            query_text: query,
+            query_origin: config.query_origins[query] ?? "manual",
+            raw_payload: (item.raw_payload as Record<string, unknown> | undefined) ?? null,
+            source_name: item.cafename ? String(item.cafename) : item.bloggername ? String(item.bloggername) : null,
+            author_name: item.bloggername ? String(item.bloggername) : null,
+            highlight_terms: Array.isArray(item.highlight_terms) ? item.highlight_terms.map(String).filter(Boolean) : [],
+          }));
         }
       } catch (error) { errors.push(`naver:${type}:${error instanceof Error ? error.message : "unknown"}`); }
     }
@@ -157,7 +228,7 @@ async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: st
       const data = await response.json() as { hits?: Array<Record<string, unknown>> };
       for (const hit of data.hits ?? []) {
         const id = String(hit.objectID ?? "");
-        result.push({ source: "hn", source_id: id, url: String(hit.url ?? `https://news.ycombinator.com/item?id=${id}`), title: normalizeNaverText(String(hit.title ?? "")), body: normalizeNaverText(String(hit.story_text ?? hit.title ?? "")), posted_at: String(hit.created_at ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual" });
+        result.push(enrichRawSignal({ source: "hn", source_id: id, url: String(hit.url ?? `https://news.ycombinator.com/item?id=${id}`), title: normalizeNaverText(String(hit.title ?? "")), body: normalizeNaverText(String(hit.story_text ?? hit.title ?? "")), posted_at: String(hit.created_at ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual", raw_payload: hit, source_name: "Hacker News", author_name: hit.author ? String(hit.author) : null, highlight_terms: [] }));
       }
     } catch (error) { errors.push(`hn:${error instanceof Error ? error.message : "unknown"}`); }
   }
@@ -176,7 +247,7 @@ async function collectThreads(config: ReturnType<typeof normalizeConfig>, querie
       url.searchParams.set("q", query); url.searchParams.set("search_type", "RECENT");
       url.searchParams.set("fields", "id,text,permalink,timestamp,username,has_replies"); url.searchParams.set("access_token", token);
       const response = await fetch(url); const data = await response.json() as { data?: Array<Record<string, unknown>> };
-      for (const item of data.data ?? []) result.push({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual" });
+      for (const item of data.data ?? []) result.push(enrichRawSignal({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual", raw_payload: item, source_name: "Threads", author_name: item.username ? String(item.username) : null, highlight_terms: [] }));
     } catch (error) { errors.push(`threads:${error instanceof Error ? error.message : "unknown"}`); }
   }
   return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.threads);
@@ -195,7 +266,7 @@ async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, err
         const rating = Number((entry["im:rating"] as { label?: string } | undefined)?.label ?? 5);
         if (rating > 3) continue;
         const id = String((entry.id as { label?: string } | undefined)?.label ?? crypto.randomUUID());
-        result.push({ source: "appstore", source_id: id, url: id, title: String((entry.title as { label?: string } | undefined)?.label ?? "저평점 리뷰"), body: String((entry.content as { label?: string } | undefined)?.label ?? ""), posted_at: String((entry.updated as { label?: string } | undefined)?.label ?? "") || null, query_text: null, query_origin: "manual" });
+        result.push(enrichRawSignal({ source: "appstore", source_id: id, url: id, title: String((entry.title as { label?: string } | undefined)?.label ?? "저평점 리뷰"), body: String((entry.content as { label?: string } | undefined)?.label ?? ""), posted_at: String((entry.updated as { label?: string } | undefined)?.label ?? "") || null, query_text: null, query_origin: "manual", raw_payload: entry, source_name: "App Store", author_name: null, highlight_terms: [] }));
       }
     } catch (error) { errors.push(`appstore:${app.appId}:${error instanceof Error ? error.message : "unknown"}`); }
   }
@@ -229,6 +300,61 @@ function normalizeAnalysis(value: Partial<Analysis>, item: RawSignal): Analysis 
     buyer_context: buyerContexts.has(value.buyer_context as BuyerContext) ? value.buyer_context as BuyerContext : fallback.buyer_context,
     maintenance_score: clamp(value.maintenance_score, 2),
   };
+}
+
+type Stage1ModelResult = {
+  id?: unknown;
+  pass?: unknown;
+  is_promotional?: unknown;
+  type?: unknown;
+  reason?: unknown;
+  reject_reason?: unknown;
+};
+
+export function normalizeStage1Result(result: Stage1ModelResult | undefined, id: string): Stage1 {
+  const isPromotional = result?.is_promotional === true;
+  const pass = result?.pass === true && !isPromotional;
+  const allowed = new Set<RejectReason>(["구직", "구매문의", "가격불만", "신체", "일회성", "정보질문", "학습", "promotional", "홍보", "해결됨", "기타"]);
+  return {
+    id,
+    pass,
+    is_promotional: isPromotional,
+    type: pass ? String(result?.type ?? "기타") : undefined,
+    reason: pass ? String(result?.reason ?? "반복 프로세스 문제") : undefined,
+    reject_reason: pass
+      ? undefined
+      : isPromotional
+        ? "promotional"
+        : allowed.has(result?.reject_reason as RejectReason) ? result?.reject_reason as RejectReason : "기타",
+  };
+}
+
+export function buildStage1Prompt(batch: Array<Pick<RawSignal, "source" | "title" | "body" | "promotional_signals" | "promotional_signal_score">>, offset = 0) {
+  const inputs = batch.map((item, index) => ({
+    id: String(offset + index),
+    source: item.source,
+    title: item.title,
+    body: item.body,
+    rule_promotional_signals: item.promotional_signals,
+    rule_promotional_score: item.promotional_signal_score,
+    promotional_threshold_note: item.source === "blog"
+      ? "블로그는 협찬·체험단 비율이 높으므로 약한 광고 단서도 엄격히 판정"
+      : "룰 신호 하나만으로 광고 확정 금지; 문맥과 시제를 함께 판정",
+  }));
+  return `다음 게시물을 엄격히 판정하라. 통과하려면 (1) 일회성이 아닌 반복 업무·생활 불편, (2) 글쓴이 본인 또는 소속 조직이 직접 겪는 문제, (3) 사람·가격·운·시장 상황이 아니라 프로세스나 도구의 문제를 모두 만족해야 한다. 하나라도 불명확하면 탈락시켜라.
+
+광고 판별은 특히 시제를 본다. 다음은 페인포인트가 아니라 광고·홍보이므로 제외한다:
+- 불편을 과거형으로 서술하고 현재는 해결된 상태인 글("예전엔 불편했는데 지금은 좋다")
+- 특정 제품·서비스를 긍정적으로 언급하며 사용을 권유하는 글
+- 후기·추천 형식으로 특정 도구의 장점을 나열하는 글
+진짜 페인포인트는 현재진행형이다: 지금 불편하거나, 방법을 묻거나, 아직 수기로 하며 해결책을 찾는 상태다.
+핵심 판별: "문제 → 해결"로 끝나면 광고, "문제 → 물음표"로 끝나면 페인포인트다.
+rule_promotional_signals는 사전 룰이 찾은 참고 신호일 뿐 단독으로 탈락시키지 말고 전체 문맥을 판정하라. 단, blog 소스는 협찬 가능성이 높으므로 더 낮은 광고 임계값을 적용하라.
+
+그 밖의 즉시 제외 범주: 구직·채용·이직·자기소개서·이력서·면접·일자리 배정, 단순 구매/배송/재고/소량·N개 단위 문의, 가격·수수료 불만, 신체·건강 문제, 일회성 환경 불만·고장·사고·분쟁·환불, 단순 정보 질문, 학습·강의·자격증, 판매·모집, 이미 답변으로 해결된 질문.
+각 결과에 is_promotional boolean을 반드시 넣는다. is_promotional=true이면 반드시 pass=false, reject_reason="promotional"로 쓴다.
+통과는 {"id":"...","pass":true,"is_promotional":false,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"is_promotional":false,"reject_reason":"구직|구매문의|가격불만|신체|일회성|정보질문|학습|promotional|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.
+${JSON.stringify(inputs)}`;
 }
 
 export async function runPipeline(input: RunConfig, options: RunPipelineOptions = {}) {
@@ -293,7 +419,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
     }
     return false;
   };
-  const rejectReasons = new Set<RejectReason>(["구직", "구매문의", "가격불만", "신체", "일회성", "정보질문", "학습", "홍보", "해결됨", "기타"]);
+  const rejectReasons = new Set<RejectReason>(["구직", "구매문의", "가격불만", "신체", "일회성", "정보질문", "학습", "promotional", "홍보", "해결됨", "기타"]);
   const stage1: Stage1[] = [];
   let llm1Calls = 0;
   for (let offset = 0; offset < filtered.length && llm1Calls < llm1MaxCalls && !stoppedReason; offset += 20) {
@@ -305,27 +431,22 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
         jsonMode: true,
         maxOutputTokens: 2200,
         system: "너는 반복적인 프로세스·도구 문제만 통과시키는 엄격한 페인포인트 판정기다. 반드시 유효한 JSON 객체로만 응답하라.",
-        user: `다음 게시물을 엄격히 판정하라. 통과하려면 (1) 일회성이 아닌 반복 업무·생활 불편, (2) 글쓴이 본인 또는 소속 조직이 직접 겪는 문제, (3) 사람·가격·운·시장 상황이 아니라 프로세스나 도구의 문제를 모두 만족해야 한다. 하나라도 불명확하면 탈락시켜라. 즉시 제외: 구직·채용·이직·자기소개서·이력서·면접·일자리 배정, 단순 구매/배송/재고/소량·N개 단위 문의, 가격·수수료 불만, 목·어깨·허리 통증과 눈 피로 같은 신체·건강 문제, 주차·식대·사업장 이전·특정 날짜 같은 일회성 환경 불만, 고장·사고·분쟁·환불 같은 일회성 사건, 단순 정보 질문, 학습·강의·자격증, 홍보·판매·모집, 이미 답변으로 해결된 질문. 통과는 {"id":"...","pass":true,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"reject_reason":"구직|구매문의|가격불만|신체|일회성|정보질문|학습|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.\n${JSON.stringify(batch.map((x, i) => ({ id: String(offset + i), title: x.title, body: x.body })))}`,
+        user: buildStage1Prompt(batch, offset),
       });
       llm1Calls++;
       recordUsage(completion);
-      const parsed = JSON.parse(completion.text) as { results?: Stage1[] };
+      const parsed = JSON.parse(completion.text) as { results?: Stage1ModelResult[] };
       if (!Array.isArray(parsed.results)) throw new Error("LLM 1차 응답에 results 배열이 없습니다.");
       const resultById = new Map(parsed.results.map(result => [String(result.id), result]));
       for (let i = 0; i < batch.length; i++) {
         const id = String(offset + i);
         const result = resultById.get(id);
-        const pass = result?.pass === true;
-        stage1.push({
-          id,
-          pass,
-          type: pass ? String(result?.type ?? "기타") : undefined,
-          reason: pass ? String(result?.reason ?? "반복 프로세스 문제") : undefined,
-          reject_reason: pass ? undefined : rejectReasons.has(result?.reject_reason as RejectReason) ? result?.reject_reason : "기타",
-        });
+        const normalized = normalizeStage1Result(result, id);
+        batch[i].is_promotional = normalized.is_promotional;
+        stage1.push(normalized);
       }
     } catch (error) {
-      for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, reject_reason: "기타" });
+      for (let i = 0; i < batch.length; i++) stage1.push({ id: String(offset + i), pass: false, is_promotional: false, reject_reason: "기타" });
       if (noteLlmError("llm1", error)) break;
     }
   }
@@ -334,7 +455,9 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   if (llm1PassRate > 0.25) errors.push(`warning:llm1:pass-rate-high:${(llm1PassRate * 100).toFixed(1)}%`);
   const rejectReasonCounts = Object.fromEntries([...rejectReasons].map(reason => [reason, stage1.filter(result => !result.pass && result.reject_reason === reason).length]));
   const passedIndexes = stage1.filter(result => result.pass).map(result => Number(result.id)).filter(Number.isFinite);
-  const passed = passedIndexes.map(index => filtered[index]).filter(Boolean).slice(0, llm2MaxCalls);
+  const passed = passedIndexes.map(index => filtered[index]).filter(Boolean)
+    .sort((a, b) => Number(["kin", "blog"].includes(b.source)) - Number(["kin", "blog"].includes(a.source)) || b.body_length - a.body_length)
+    .slice(0, llm2MaxCalls);
   const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: ProductCompetitor[]; marketVerdict: MarketVerdict; scores: FourScores; precisionVerified: boolean }> = [];
   let llm2Calls = 0;
   let verifyCalls = 0;
@@ -410,11 +533,13 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
 
   const stageCounts = {
     collected: deduped.length,
+    source_counts: Object.fromEntries([...new Set(deduped.map(item => item.source))].map(source => [source, deduped.filter(item => item.source === source).length])),
     rulePassed: filtered.length,
     llm1Evaluated: stage1.length,
     llm1Passed: stage1PassCount,
     llm1_pass_rate: llm1PassRate,
     reject_reason_counts: rejectReasonCounts,
+    promotional: rejectReasonCounts.promotional ?? 0,
     llm2Analyzed: analyses.length,
     appVerified: analyses.length,
     verified: verifiedItems,

@@ -13,6 +13,12 @@ export function normalizeNaverText(value: string): string {
     .trim();
 }
 
+export function normalizeNaverPostdate(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  const match = text.match(/^(\d{4})(\d{2})(\d{2})$/);
+  return match ? `${match[1]}-${match[2]}-${match[3]}T00:00:00+09:00` : text || null;
+}
+
 export async function searchNaver(params: {
   type: NaverSearchType;
   query: string;
@@ -39,6 +45,10 @@ export async function searchNaver(params: {
   const data = await response.json() as { items?: Array<Record<string, unknown>> };
   return (data.items ?? []).map((item) => ({
     ...item,
+    raw_payload: item,
+    highlight_terms: [...String(item.title ?? "").matchAll(/<b>(.*?)<\/b>/gi), ...String(item.description ?? "").matchAll(/<b>(.*?)<\/b>/gi)]
+      .map(match => normalizeNaverText(String(match[1] ?? "")))
+      .filter(Boolean),
     title: normalizeNaverText(String(item.title ?? "")),
     description: normalizeNaverText(String(item.description ?? "")),
   }));

@@ -14,11 +14,11 @@ test("수동 실행은 검색어·소스·수집량·검증 상한을 서버에�
   }, queries);
 
   assert.equal(limited.config.queries?.length, 5);
-  assert.deepEqual(Object.keys(limited.config.sources ?? {}), ["naverCafe", "naverKin"]);
+  assert.deepEqual(Object.keys(limited.config.sources ?? {}), ["naverCafe", "naverKin", "naverBlog"]);
   assert.equal(limited.config.limits?.itemsPerSource, 50);
   assert.equal(limited.config.auto_verify_top_n, 10);
   assert.equal(limited.requestedSourceCount, 3);
-  assert.equal(limited.executedSourceCount, 2);
+  assert.equal(limited.executedSourceCount, 3);
 });
 
 test("iTunes 검색은 실행 내 캐시로 같은 검색어의 중복 호출을 제거한다", async () => {
