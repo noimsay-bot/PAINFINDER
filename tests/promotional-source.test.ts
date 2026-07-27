@@ -29,10 +29,10 @@ test("LLM이 광고로 판정하면 pass 응답이 와도 promotional 기각으�
   );
 });
 
-test("네이버 자동 수집 기본 비중은 지식iN 35 · 블로그 30 · 카페 35다", () => {
+test("축소된 네이버 소스끼리만 켜도 10 · 20 · 15 비율을 유지한다", () => {
   assert.deepEqual(
     allocateSourceTargets(100, ["kin", "blog", "cafearticle"]),
-    { kin: 35, blog: 30, cafearticle: 35 },
+    { kin: 22, blog: 45, cafearticle: 33 },
   );
 });
 

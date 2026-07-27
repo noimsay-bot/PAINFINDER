@@ -31,9 +31,11 @@ export function calculateFourScores(opts: {
   moneySignal: string | null;
   verdict: MarketVerdict;
   buyerContext: BuyerContext;
+  incumbentDissatisfaction?: boolean;
 }): FourScores {
   const f1 = clamp(opts.aiReplacementScore, 2);
-  const f4 = scoreMarket(opts.verdict);
+  const marketScore = scoreMarket(opts.verdict);
+  const f4 = opts.incumbentDissatisfaction ? Math.max(marketScore ?? 0, 2) : marketScore;
   const f5 = scorePayment(opts);
   const f6 = clamp(opts.maintenanceScore, 2);
   return { f1, f4, f5, f6, total: f1 + (f4 ?? 0) + f5 + f6 };

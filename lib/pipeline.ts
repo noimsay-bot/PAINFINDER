@@ -8,6 +8,18 @@ import { classifyFinalRuleRejection, type RuleExclusion } from "./rule-filter";
 import { calculateFourScores, type BuyerContext, type FourScores } from "./scoring";
 import { matchWatchedCafe, type WatchedCafe } from "./watched-cafes";
 import { DEFAULT_REVIEW_QUEUE_MIN_SCORE, mergeSimilarCandidates, reviewStatusFor } from "./review-queue";
+import {
+  APP_REVIEW_MAX_PER_APP,
+  fetchPlayReviews,
+  hasIncumbentDissatisfaction,
+  isPlayBlockError,
+  isPlayScrapeEnabled,
+  playScrapeDelay,
+  type ReviewApp,
+  type ReviewPlatform,
+} from "./app-reviews";
+
+export type SourceWeightKey = NaverSearchType | "appreview" | "threads" | "hn";
 
 export type RunConfig = {
   id?: string;
@@ -22,7 +34,7 @@ export type RunConfig = {
   domains?: string[];
   excluded_domains?: string[];
   sources?: Record<string, boolean>;
-  source_weights?: Partial<Record<NaverSearchType, number>>;
+  source_weights?: Partial<Record<SourceWeightKey, number>>;
   period_days?: number;
   auto_verify_top_n?: number;
   app_list?: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
@@ -41,14 +53,14 @@ type NormalizedRunConfig = {
   query_origins: Record<string, string>;
   excluded_domains: string[];
   sources: Record<string, boolean>;
-  source_weights: Record<NaverSearchType, number>;
+  source_weights: Record<SourceWeightKey, number>;
   period_days: number;
   auto_verify_top_n: number;
   app_list: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
   limits: { queries: number; itemsPerSource: number; dailyCostUsd: number };
 };
 
-type RawSignal = {
+export type RawSignal = {
   source: string;
   source_id: string;
   url: string;
@@ -69,6 +81,12 @@ type RawSignal = {
   highlight_terms: string[];
   watched: boolean;
   watched_cafe_id: string | null;
+  app_target_id: number | string | null;
+  app_name: string | null;
+  review_platform: ReviewPlatform | null;
+  review_score: number | null;
+  app_version: string | null;
+  incumbent_dissatisfaction: boolean;
 };
 
 export type RejectReason = "구직" | "구매문의" | "가격불만" | "신체" | "일회성" | "정보질문" | "학습" | "promotional" | "홍보" | "해결됨" | "기타";
@@ -99,20 +117,24 @@ const SOURCE_MAP: Record<string, NaverSearchType> = {
   "네이버카페": "cafearticle", "지식iN": "kin", "블로그": "blog", "웹문서": "webkr",
 };
 
-export const DEFAULT_SOURCE_WEIGHTS: Record<NaverSearchType, number> = {
-  kin: 35,
-  blog: 30,
-  cafearticle: 35,
+export const DEFAULT_SOURCE_WEIGHTS: Record<SourceWeightKey, number> = {
+  appreview: 40,
+  blog: 20,
+  kin: 10,
+  cafearticle: 15,
+  threads: 15,
   webkr: 0,
+  hn: 0,
 };
 
-export function allocateSourceTargets(
+export function allocateSourceTargets<T extends string>(
   total: number,
-  enabledSources: NaverSearchType[],
-  weights: Partial<Record<NaverSearchType, number>> = DEFAULT_SOURCE_WEIGHTS,
+  enabledSources: T[],
+  weights: Partial<Record<T, number>> = DEFAULT_SOURCE_WEIGHTS as Partial<Record<T, number>>,
 ) {
   const sources = [...new Set(enabledSources)];
-  const positive = sources.map(source => ({ source, weight: Math.max(0, Number(weights[source] ?? DEFAULT_SOURCE_WEIGHTS[source] ?? 0)) }));
+  const defaults = DEFAULT_SOURCE_WEIGHTS as Record<string, number>;
+  const positive = sources.map(source => ({ source, weight: Math.max(0, Number(weights[source] ?? defaults[source] ?? 0)) }));
   const weightTotal = positive.reduce((sum, item) => sum + item.weight, 0);
   const effective = weightTotal > 0 ? positive : positive.map(item => ({ ...item, weight: 1 }));
   const effectiveTotal = effective.reduce((sum, item) => sum + item.weight, 0);
@@ -125,24 +147,44 @@ export function allocateSourceTargets(
     if (remaining-- <= 0) break;
     item.count++;
   }
-  return Object.fromEntries(allocations.map(item => [item.source, item.count])) as Partial<Record<NaverSearchType, number>>;
+  return Object.fromEntries(allocations.map(item => [item.source, item.count])) as Partial<Record<T, number>>;
+}
+
+export function effectiveSourceWeights(
+  weights: Partial<Record<SourceWeightKey, number>>,
+  threadsConnected: boolean,
+) {
+  const resolved = { ...DEFAULT_SOURCE_WEIGHTS, ...weights };
+  if (!threadsConnected && resolved.threads > 0) {
+    const released = resolved.threads;
+    resolved.threads = 0;
+    resolved.appreview += Math.round(released * 2 / 3);
+    resolved.blog += released - Math.round(released * 2 / 3);
+  }
+  return resolved;
 }
 
 function enrichRawSignal(
-  input: Omit<RawSignal, "body_length" | "low_confidence" | "promotional_signals" | "promotional_signal_score" | "promotional_rule_flagged" | "is_promotional" | "watched" | "watched_cafe_id">
-    & Partial<Pick<RawSignal, "watched" | "watched_cafe_id">>,
+  input: Omit<RawSignal, "body_length" | "low_confidence" | "promotional_signals" | "promotional_signal_score" | "promotional_rule_flagged" | "is_promotional" | "watched" | "watched_cafe_id" | "app_target_id" | "app_name" | "review_platform" | "review_score" | "app_version" | "incumbent_dissatisfaction">
+    & Partial<Pick<RawSignal, "watched" | "watched_cafe_id" | "app_target_id" | "app_name" | "review_platform" | "review_score" | "app_version" | "incumbent_dissatisfaction">>,
 ): RawSignal {
   const promotional = detectPromotionalSignals(input);
   return {
     ...input,
     body_length: input.body.length,
-    low_confidence: input.body.length < 40,
+    low_confidence: ["appstore", "playstore"].includes(input.source) ? input.body.length < 15 : input.body.length < 40,
     promotional_signals: promotional.signals,
     promotional_signal_score: promotional.score,
     promotional_rule_flagged: promotional.flagged,
     is_promotional: false,
     watched: input.watched ?? false,
     watched_cafe_id: input.watched_cafe_id ?? null,
+    app_target_id: input.app_target_id ?? null,
+    app_name: input.app_name ?? null,
+    review_platform: input.review_platform ?? null,
+    review_score: input.review_score ?? null,
+    app_version: input.app_version ?? null,
+    incumbent_dissatisfaction: input.incumbent_dissatisfaction ?? hasIncumbentDissatisfaction(input.body),
   };
 }
 
@@ -161,7 +203,7 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
     queries: [...new Set((input.queries ?? input.domains ?? []).map(query => query.trim()).filter(Boolean))],
     query_origins: input.query_origins ?? {},
     excluded_domains: input.excluded_domains ?? ["연예", "정치", "스포츠"],
-    sources: input.sources ?? { naverCafe: true, naverKin: true, naverBlog: true, appstore: true },
+    sources: input.sources ?? { naverCafe: true, naverKin: true, naverBlog: true, appreview: true },
     source_weights: {
       ...DEFAULT_SOURCE_WEIGHTS,
       ...(input.source_weights ?? {}),
@@ -190,12 +232,12 @@ async function collectNaver(
   errors: string[],
   canContinue: RunGuard,
   watchedCafes: WatchedCafe[],
+  targets: Partial<Record<SourceWeightKey, number>>,
 ) {
   const clientId = process.env.NAVER_CLIENT_ID;
   const clientSecret = process.env.NAVER_CLIENT_SECRET;
   if (!clientId || !clientSecret) return [] as RawSignal[];
   const enabled = [...new Set(Object.entries(config.sources).filter(([key, enabled]) => enabled && SOURCE_MAP[key]).map(([key]) => SOURCE_MAP[key]))];
-  const targets = allocateSourceTargets(config.limits.itemsPerSource, enabled, config.source_weights);
   const collected: RawSignal[] = [];
   for (const type of enabled) {
     if (!canContinue()) break;
@@ -235,8 +277,9 @@ async function collectNaver(
   return collected;
 }
 
-async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard) {
+async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard, target: number) {
   if (!config.sources.hn && !config.sources.HN) return [] as RawSignal[];
+  if (target <= 0) return [] as RawSignal[];
   const result: RawSignal[] = [];
   for (const query of queries.slice(0, 5)) {
     if (!canContinue()) break;
@@ -245,16 +288,18 @@ async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: st
       if (!response.ok) throw new Error(String(response.status));
       const data = await response.json() as { hits?: Array<Record<string, unknown>> };
       for (const hit of data.hits ?? []) {
+        if (result.length >= target) break;
         const id = String(hit.objectID ?? "");
         result.push(enrichRawSignal({ source: "hn", source_id: id, url: String(hit.url ?? `https://news.ycombinator.com/item?id=${id}`), title: normalizeNaverText(String(hit.title ?? "")), body: normalizeNaverText(String(hit.story_text ?? hit.title ?? "")), posted_at: String(hit.created_at ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual", raw_payload: hit, source_name: "Hacker News", author_name: hit.author ? String(hit.author) : null, highlight_terms: [] }));
       }
     } catch (error) { errors.push(`hn:${error instanceof Error ? error.message : "unknown"}`); }
   }
-  return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.hn);
+  return result.slice(0, target);
 }
 
-async function collectThreads(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard) {
+async function collectThreads(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard, target: number) {
   if (!config.sources.threads && !config.sources.Threads) return [] as RawSignal[];
+  if (target <= 0) return [] as RawSignal[];
   const token = process.env.THREADS_ACCESS_TOKEN;
   if (!token) { errors.push("threads:access-token-missing"); return []; }
   const result: RawSignal[] = [];
@@ -265,30 +310,91 @@ async function collectThreads(config: ReturnType<typeof normalizeConfig>, querie
       url.searchParams.set("q", query); url.searchParams.set("search_type", "RECENT");
       url.searchParams.set("fields", "id,text,permalink,timestamp,username,has_replies"); url.searchParams.set("access_token", token);
       const response = await fetch(url); const data = await response.json() as { data?: Array<Record<string, unknown>> };
-      for (const item of data.data ?? []) result.push(enrichRawSignal({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual", raw_payload: item, source_name: "Threads", author_name: item.username ? String(item.username) : null, highlight_terms: [] }));
+      for (const item of data.data ?? []) {
+        if (result.length >= target) break;
+        result.push(enrichRawSignal({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual", raw_payload: item, source_name: "Threads", author_name: item.username ? String(item.username) : null, highlight_terms: [] }));
+      }
     } catch (error) { errors.push(`threads:${error instanceof Error ? error.message : "unknown"}`); }
   }
-  return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.threads);
+  return result.slice(0, target);
 }
 
-async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, errors: string[], canContinue: RunGuard) {
-  if (!config.sources.appstore && !config.sources["앱리뷰"]) return [] as RawSignal[];
+export function reviewCompetitor(raw: RawSignal): ProductCompetitor | null {
+  if (!["appstore", "playstore"].includes(raw.source) || !raw.app_name) return null;
+  return {
+    name: raw.app_name,
+    url: raw.url,
+    pricing: "unknown",
+    quality_note: `${raw.review_platform === "android" ? "Google Play" : "App Store"} 저평점 리뷰에서 자동 확인`,
+    last_updated_signal: raw.posted_at,
+    seller_name: null,
+    source: raw.source === "playstore" ? "playstore" : "appstore",
+  };
+}
+
+async function collectAppReviews(config: ReturnType<typeof normalizeConfig>, apps: ReviewApp[], errors: string[], canContinue: RunGuard, target: number) {
+  if (!config.sources.appstore && !config.sources.appreview && !config.sources["앱리뷰"]) return [] as RawSignal[];
   const result: RawSignal[] = [];
-  for (const app of config.app_list.filter(a => a.platform === "ios")) {
+  const active = apps.filter(app => app.active);
+  const platformCount = active.reduce((count, app) => count + Number(Boolean(app.ios_app_id)) + Number(Boolean(app.android_package) && isPlayScrapeEnabled()), 0);
+  const perPlatformTarget = Math.min(APP_REVIEW_MAX_PER_APP, Math.max(1, Math.ceil(target / Math.max(1, platformCount))));
+  for (const app of active.filter(item => item.ios_app_id)) {
     if (!canContinue()) break;
+    if (result.length >= target) break;
     try {
-      const country = app.country ?? "kr";
-      const response = await fetch(`https://itunes.apple.com/${country}/rss/customerreviews/id=${encodeURIComponent(app.appId)}/sortBy=mostRecent/json`);
+      const response = await fetch(`https://itunes.apple.com/kr/rss/customerreviews/id=${encodeURIComponent(String(app.ios_app_id))}/sortBy=mostRecent/json`, { signal: AbortSignal.timeout(12_000) });
+      if (!response.ok) throw new Error(`iTunes ${response.status}`);
       const data = await response.json() as { feed?: { entry?: Array<Record<string, unknown>> } };
       for (const entry of data.feed?.entry ?? []) {
         const rating = Number((entry["im:rating"] as { label?: string } | undefined)?.label ?? 5);
         if (rating > 3) continue;
-        const id = String((entry.id as { label?: string } | undefined)?.label ?? crypto.randomUUID());
-        result.push(enrichRawSignal({ source: "appstore", source_id: id, url: id, title: String((entry.title as { label?: string } | undefined)?.label ?? "저평점 리뷰"), body: String((entry.content as { label?: string } | undefined)?.label ?? ""), posted_at: String((entry.updated as { label?: string } | undefined)?.label ?? "") || null, query_text: null, query_origin: "manual", raw_payload: entry, source_name: "App Store", author_name: null, highlight_terms: [] }));
+        const reviewText = String((entry.content as { label?: string } | undefined)?.label ?? "");
+        const reviewAt = String((entry.updated as { label?: string } | undefined)?.label ?? "") || null;
+        const version = String((entry["im:version"] as { label?: string } | undefined)?.label ?? "") || null;
+        const reviewId = String((entry.id as { label?: string } | undefined)?.label ?? crypto.randomUUID());
+        result.push(enrichRawSignal({ source: "appstore", source_id: reviewId, url: app.ios_url || `https://apps.apple.com/kr/app/id${app.ios_app_id}`, title: String((entry.title as { label?: string } | undefined)?.label ?? "저평점 리뷰"), body: reviewText, posted_at: reviewAt, query_text: null, query_origin: "review_app", raw_payload: { score: rating, text: reviewText, at: reviewAt, version, entry }, source_name: app.name, author_name: null, highlight_terms: [], app_target_id: app.id, app_name: app.name, review_platform: "ios", review_score: rating, app_version: version }));
+        if (result.filter(item => item.app_target_id === app.id && item.review_platform === "ios").length >= perPlatformTarget || result.length >= target) break;
       }
-    } catch (error) { errors.push(`appstore:${app.appId}:${error instanceof Error ? error.message : "unknown"}`); }
+    } catch (error) { errors.push(`appstore:${app.ios_app_id}:${error instanceof Error ? error.message : "unknown"}`); }
   }
-  return result.slice(0, DEFAULT_LIMITS.ITEMS_PER_SOURCE.appstore);
+
+  if (!isPlayScrapeEnabled()) {
+    errors.push("playstore:disabled:ENABLE_PLAY_SCRAPE=false");
+    return result.slice(0, target);
+  }
+
+  let emptyResponses = 0;
+  for (const app of active.filter(item => item.android_package)) {
+    if (!canContinue() || result.length >= target) break;
+    try {
+      const remaining = Math.min(perPlatformTarget, target - result.length, APP_REVIEW_MAX_PER_APP);
+      const reviews = await fetchPlayReviews(String(app.android_package), remaining);
+      if (!reviews.data.length) {
+        emptyResponses++;
+        errors.push(`playstore:${app.android_package}:empty-response`);
+        if (emptyResponses >= 2) {
+          errors.push("playstore:source-stopped:repeated-empty-response");
+          break;
+        }
+      } else {
+        emptyResponses = 0;
+      }
+      for (const review of reviews.data) {
+        if (review.score > 3) continue;
+        const reviewAt = review.date ? new Date(review.date).toISOString() : null;
+        result.push(enrichRawSignal({ source: "playstore", source_id: review.id, url: app.android_url || review.url || `https://play.google.com/store/apps/details?id=${encodeURIComponent(String(app.android_package))}`, title: review.title || "저평점 리뷰", body: review.text, posted_at: reviewAt, query_text: null, query_origin: "review_app", raw_payload: { score: review.score, text: review.text, at: reviewAt, version: review.version, review }, source_name: app.name, author_name: review.userName || null, highlight_terms: [], app_target_id: app.id, app_name: app.name, review_platform: "android", review_score: review.score, app_version: review.version || null }));
+        if (result.length >= target) break;
+      }
+    } catch (error) {
+      errors.push(`playstore:${app.android_package}:${error instanceof Error ? error.message : "unknown"}`);
+      if (isPlayBlockError(error)) {
+        errors.push("playstore:source-stopped:block-detected");
+        break;
+      }
+    }
+    if (canContinue() && result.length < target) await playScrapeDelay(Number(process.env.PLAY_SCRAPE_DELAY_MS) || undefined);
+  }
+  return result.slice(0, target);
 }
 
 function fallbackAnalysis(item: RawSignal): Analysis {
@@ -393,6 +499,8 @@ rule_promotional_signals는 사전 룰이 찾은 참고 신호일 뿐 단독으�
 
 watched_cafe=true인 글은 사용자가 가입한 카페의 원문을 직접 읽고 최종 판단한다. 명백한 광고·구직·단순구매는 똑같이 제외하되, 페인포인트일 가능성이 경계선이거나 짧은 스니펫 때문에 애매하면 pass=true로 사람에게 넘겨라. 애매한 결과에는 borderline=true를 넣는다. 다른 글은 borderline=false다.
 
+appstore 또는 playstore 소스는 앱의 1~3점 리뷰 전문이다. "특정 기능이 없거나 불편해서 생긴 반복적 불만"만 통과시켜라. "○○ 기능이 있으면 좋겠다", "△△가 안 돼서 다른 앱을 찾는다"는 강한 신호다. 단순 별점 불만("별로예요", "느려요")과 일회성 버그·고장 신고는 탈락시켜라. 다른 앱을 찾거나 갈아타려는 표현은 인컴번트 불만족 신호다.
+
 그 밖의 즉시 제외 범주: 구직·채용·이직·자기소개서·이력서·면접·일자리 배정, 단순 구매/배송/재고/소량·N개 단위 문의, 가격·수수료 불만, 신체·건강 문제, 일회성 환경 불만·고장·사고·분쟁·환불, 단순 정보 질문, 학습·강의·자격증, 판매·모집, 이미 답변으로 해결된 질문.
 각 결과에 is_promotional boolean을 반드시 넣는다. is_promotional=true이면 반드시 pass=false, reject_reason="promotional"로 쓴다.
 통과는 {"id":"...","pass":true,"is_promotional":false,"borderline":false,"type":"1~6","reason":"한 줄"}, 탈락은 {"id":"...","pass":false,"is_promotional":false,"borderline":false,"reject_reason":"구직|구매문의|가격불만|신체|일회성|정보질문|학습|promotional|홍보|해결됨|기타"}로 작성하라. 반드시 {"results":[...]} JSON 객체로 응답하라.
@@ -434,15 +542,44 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   const llm2MaxCalls = Math.min(options.llm2MaxCalls ?? DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN, DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN);
   const errors: string[] = [];
   const queries = makeQueries(config);
-  if (!queries.length) throw new Error("검색어를 1개 이상 입력해 주세요.");
-  const watchedCafeRows = await supabaseRest("watched_cafes?active=eq.true&select=id,cafe_id,cafe_name,topic_seeds,active&order=id.asc") as WatchedCafe[] | null;
+  const appReviewsEnabled = Boolean(config.sources.appreview || config.sources.appstore || config.sources["앱리뷰"]);
+  if (!queries.length && !appReviewsEnabled) throw new Error("검색어를 1개 이상 입력해 주세요.");
+  const [watchedCafeRows, reviewAppRows] = await Promise.all([
+    supabaseRest("watched_cafes?active=eq.true&select=id,cafe_id,cafe_name,topic_seeds,active&order=id.asc") as Promise<WatchedCafe[] | null>,
+    supabaseRest("review_apps?active=eq.true&select=id,name,ios_app_id,android_package,ios_url,android_url,active&order=id.asc")
+      .catch(error => {
+        errors.push(`review-apps:${error instanceof Error ? error.message : "unavailable"}`);
+        return null;
+      }) as Promise<ReviewApp[] | null>,
+  ]);
   const watchedCafes = (watchedCafeRows ?? []).map(cafe => ({ ...cafe, topic_seeds: Array.isArray(cafe.topic_seeds) ? cafe.topic_seeds.map(String) : [] }));
+  const legacyApps: ReviewApp[] = config.app_list.map(app => ({
+    id: null,
+    name: app.appId,
+    ios_app_id: app.platform === "ios" ? app.appId : null,
+    android_package: app.platform === "android" ? app.appId : null,
+    ios_url: null,
+    android_url: null,
+    active: true,
+  }));
+  const reviewApps = reviewAppRows?.length ? reviewAppRows : legacyApps;
+  const threadsConnected = Boolean((config.sources.threads || config.sources.Threads) && process.env.THREADS_ACCESS_TOKEN);
+  const enabledWeightedSources: SourceWeightKey[] = [];
+  if (queries.length && (config.sources.naverCafe || config.sources["네이버카페"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("cafearticle");
+  if (queries.length && (config.sources.naverKin || config.sources["지식iN"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("kin");
+  if (queries.length && (config.sources.naverBlog || config.sources["블로그"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("blog");
+  if (queries.length && (config.sources.naverWeb || config.sources["웹문서"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("webkr");
+  if (appReviewsEnabled && reviewApps.length) enabledWeightedSources.push("appreview");
+  if (queries.length && threadsConnected) enabledWeightedSources.push("threads");
+  if (queries.length && (config.sources.hn || config.sources.HN)) enabledWeightedSources.push("hn");
+  const resolvedWeights = effectiveSourceWeights(config.source_weights, threadsConnected);
+  const sourceTargets = allocateSourceTargets(config.limits.itemsPerSource, enabledWeightedSources, resolvedWeights);
   const collected = canContinue()
     ? await Promise.all([
-      collectNaver(config, queries, errors, canContinue, watchedCafes),
-      collectHn(config, queries, errors, canContinue),
-      collectThreads(config, queries, errors, canContinue),
-      collectAppReviews(config, errors, canContinue),
+      collectNaver(config, queries, errors, canContinue, watchedCafes, sourceTargets),
+      collectHn(config, queries, errors, canContinue, sourceTargets.hn ?? 0),
+      collectThreads(config, queries, errors, canContinue, sourceTargets.threads ?? 0),
+      collectAppReviews(config, reviewApps, errors, canContinue, sourceTargets.appreview ?? 0),
     ]).then(parts => parts.flat())
     : [];
   const collectedUnique = [...new Map(collected.map(item => [`${item.source}:${item.source_id}`, item])).values()];
@@ -529,7 +666,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   const rejectReasonCounts = Object.fromEntries([...rejectReasons].map(reason => [reason, stage1.filter(result => !result.pass && result.reject_reason === reason).length]));
   const passedIndexes = stage1.filter(result => result.pass).map(result => Number(result.id)).filter(Number.isFinite);
   const passed = passedIndexes.map(index => filtered[index]).filter(Boolean)
-    .sort((a, b) => Number(b.watched) - Number(a.watched) || Number(["kin", "blog"].includes(b.source)) - Number(["kin", "blog"].includes(a.source)) || b.body_length - a.body_length)
+    .sort((a, b) => Number(b.incumbent_dissatisfaction) - Number(a.incumbent_dissatisfaction) || Number(["appstore", "playstore"].includes(b.source)) - Number(["appstore", "playstore"].includes(a.source)) || Number(b.watched) - Number(a.watched) || b.body_length - a.body_length)
     .slice(0, llm2MaxCalls);
   const analyses: Array<{ raw: RawSignal; analysis: Analysis; competitors: ProductCompetitor[]; marketVerdict: MarketVerdict; scores: FourScores; precisionVerified: boolean }> = [];
   let llm2Calls = 0;
@@ -552,13 +689,14 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
       recordUsage(completion);
       analysis = normalizeAnalysis(JSON.parse(completion.text) as Partial<Analysis>, raw);
     } catch (error) { stopAfterItem = noteLlmError("llm2", error); }
+    const automaticCompetitor = reviewCompetitor(raw);
     const marketVerdict: MarketVerdict = "unverified";
     analyses.push({
       raw,
       analysis,
-      competitors: [],
+      competitors: automaticCompetitor ? [automaticCompetitor] : [],
       marketVerdict,
-      scores: calculateFourScores({ aiReplacementScore: analysis.ai_replacement_score, maintenanceScore: analysis.maintenance_score, moneySignal: analysis.money_signal, verdict: marketVerdict, buyerContext: analysis.buyer_context }),
+      scores: calculateFourScores({ aiReplacementScore: analysis.ai_replacement_score, maintenanceScore: analysis.maintenance_score, moneySignal: analysis.money_signal, verdict: marketVerdict, buyerContext: analysis.buyer_context, incumbentDissatisfaction: raw.incumbent_dissatisfaction }),
       precisionVerified: false,
     });
     if (stopAfterItem) break;
@@ -570,12 +708,13 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
     while (appIndex < analyses.length) {
       if (stoppedReason || stopIfTimeBudgetReached()) return;
       const candidate = analyses[appIndex++];
+      if (["appstore", "playstore"].includes(candidate.raw.source)) continue;
       const appVerification = await searchAppMarket(candidate.analysis.domain, appMarketContext);
       candidate.competitors = appVerification.products;
       // App-market lookup is only a partial input. Until precision verification
       // finishes, the market state and incumbent score must remain unknown.
       candidate.marketVerdict = "unverified";
-      candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: "unverified", buyerContext: candidate.analysis.buyer_context });
+      candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: "unverified", buyerContext: candidate.analysis.buyer_context, incumbentDissatisfaction: candidate.raw.incumbent_dissatisfaction });
       verificationCounts.appProduct += appVerification.counts.appProduct;
       errors.push(...appVerification.errors);
     }
@@ -593,7 +732,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
         const verification = await verifyMarket({ searchTerms: candidate.analysis.search_terms_for_verification, llm, model: verifyModel, naverClientId: process.env.NAVER_CLIENT_ID, naverClientSecret: process.env.NAVER_CLIENT_SECRET });
         candidate.competitors = mergeProducts(candidate.competitors, verification.products);
         candidate.marketVerdict = classifyMarket(candidate.competitors);
-        candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: candidate.marketVerdict, buyerContext: candidate.analysis.buyer_context });
+        candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: candidate.marketVerdict, buyerContext: candidate.analysis.buyer_context, incumbentDissatisfaction: candidate.raw.incumbent_dissatisfaction });
         candidate.precisionVerified = true;
         verifiedItems++;
         for (const key of Object.keys(verificationCounts) as Array<keyof VerificationCounts>) verificationCounts[key] += verification.counts[key];
@@ -607,6 +746,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   const stageCounts = {
     collected: collectedUnique.length,
     source_counts: Object.fromEntries([...new Set(collectedUnique.map(item => item.source))].map(source => [source, collectedUnique.filter(item => item.source === source).length])),
+    source_pass_counts: Object.fromEntries([...new Set(filtered.map(item => item.source))].map(source => [source, stage1.filter(result => result.pass && filtered[Number(result.id)]?.source === source).length])),
     previouslyUserRejected: rejectedGuard.excluded,
     activeFilterExcluded: activeFilterGuard.excluded,
     rulePassed: filtered.length,
@@ -795,7 +935,7 @@ export async function persistRun(result: Awaited<ReturnType<typeof runPipeline>>
       f4: candidate.scores.f4,
       f5: candidate.scores.f5,
       f6: candidate.scores.f6,
-      data_access_stable: true,
+      data_access_stable: candidate.raw.source !== "playstore",
       verdict: candidate.marketVerdict,
       verified: candidate.precisionVerified,
     };

@@ -30,6 +30,28 @@ async function addLearningSuggestion(type: LearningSuggestionType, value: string
   });
 }
 
+async function applyRejectionLearning(reasonCategory: NonNullable<ReturnType<typeof normalizeRejectionReasonCategory>>, reasonNote: string | null, painPointId: string, pain: Row, raw: Row) {
+  if (reasonCategory === "not_painpoint") {
+    const text = `${reasonNote ?? ""} ${String(raw.title ?? "")} ${String(raw.body ?? "")} ${String(pain.pain_summary ?? "")}`;
+    const results = await Promise.all(extractSafeAutoExclusionTerms(text).map(term =>
+      addActiveFilter({ keyword: term, kind: "keyword", sourceReason: reasonCategory, mode: "auto", originPainPointId: painPointId })
+    ));
+    return results.filter(Boolean).length;
+  }
+  if (reasonCategory === "promotional") {
+    const text = `${String(raw.title ?? "")} ${String(raw.body ?? "")}`;
+    const results = await Promise.all(extractPromotionalExclusionTerms(text).filter(isSafeAutoExclusionTerm).map(term =>
+      addActiveFilter({ keyword: term, kind: "keyword", sourceReason: reasonCategory, mode: "auto", originPainPointId: painPointId })
+    ));
+    return results.filter(Boolean).length;
+  }
+  if (reasonCategory === "out_of_interest") await addLearningSuggestion("domain", String(pain.domain ?? ""), painPointId);
+  if (reasonCategory === "inaccurate_summary") {
+    await addLearningSuggestion("prompt_example", `${String(pain.domain ?? "미분류")} | ${String(pain.pain_summary ?? "")}`, painPointId);
+  }
+  return 0;
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json() as { painPointId?: string; action?: string; reasonCategory?: string; reasonNote?: string; domain?: string };
@@ -72,18 +94,21 @@ export async function POST(request: Request) {
     const reasonNote = body.action === "rejected" ? String(body.reasonNote ?? "").trim().slice(0, 500) : null;
     if (reasonCategory === "other" && !reasonNote) return NextResponse.json({ error: "기타 사유를 입력해 주세요." }, { status: 400 });
     const reason = reasonCategory ? `${REJECTION_REASON_LABELS[reasonCategory]}${reasonNote ? ` · ${reasonNote}` : ""}` : null;
-    const painRows = await supabaseRest(`pain_points?id=eq.${encodeURIComponent(body.painPointId)}&select=id,raw_item_id,pain_summary,domain,raw_items(id,title,body)&limit=1`) as Row[] | null;
+    const [painRows, saved] = await Promise.all([
+      supabaseRest(`pain_points?id=eq.${encodeURIComponent(body.painPointId)}&select=id,raw_item_id,pain_summary,domain,raw_items(id,title,body)&limit=1`) as Promise<Row[] | null>,
+      supabaseRest("decisions", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ pain_point_id: body.painPointId, action: body.action, reason, reason_category: reasonCategory, reason_note: reasonNote }),
+      }),
+    ]);
     const pain = painRows?.[0] ?? {};
     const raw = one(pain.raw_items);
-    const saved = await supabaseRest("decisions", {
-      method: "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify({ pain_point_id: body.painPointId, action: body.action, reason, reason_category: reasonCategory, reason_note: reasonNote }),
-    });
 
     const rawItemId = String(pain.raw_item_id ?? raw.id ?? "");
+    const followUpTasks: Promise<unknown>[] = [];
     if (rawItemId) {
-      await supabaseRest(`raw_items?id=eq.${encodeURIComponent(rawItemId)}`, {
+      followUpTasks.push(supabaseRest(`raw_items?id=eq.${encodeURIComponent(rawItemId)}`, {
         method: "PATCH",
         body: JSON.stringify(body.action === "unreviewed"
           ? {
@@ -94,28 +119,16 @@ export async function POST(request: Request) {
               review_status_updated_at: new Date().toISOString(),
             }
           : { status: body.action === "rejected" ? "rejected_by_user" : "analyzed" }),
-      });
+      }));
     }
 
-    let automaticFilterCount = 0;
+    let learningTask: Promise<number> | null = null;
     if (body.action === "rejected" && reasonCategory) {
-      if (reasonCategory === "not_painpoint") {
-        const text = `${reasonNote ?? ""} ${String(raw.title ?? "")} ${String(raw.body ?? "")} ${String(pain.pain_summary ?? "")}`;
-        for (const term of extractSafeAutoExclusionTerms(text)) {
-          if (await addActiveFilter({ keyword: term, kind: "keyword", sourceReason: reasonCategory, mode: "auto", originPainPointId: body.painPointId })) automaticFilterCount++;
-        }
-      }
-      if (reasonCategory === "promotional") {
-        const text = `${String(raw.title ?? "")} ${String(raw.body ?? "")}`;
-        for (const term of extractPromotionalExclusionTerms(text).filter(isSafeAutoExclusionTerm)) {
-          if (await addActiveFilter({ keyword: term, kind: "keyword", sourceReason: reasonCategory, mode: "auto", originPainPointId: body.painPointId })) automaticFilterCount++;
-        }
-      }
-      if (reasonCategory === "out_of_interest") await addLearningSuggestion("domain", String(pain.domain ?? ""), body.painPointId);
-      if (reasonCategory === "inaccurate_summary") {
-        await addLearningSuggestion("prompt_example", `${String(pain.domain ?? "미분류")} | ${String(pain.pain_summary ?? "")}`, body.painPointId);
-      }
+      learningTask = applyRejectionLearning(reasonCategory, reasonNote, body.painPointId, pain, raw);
+      followUpTasks.push(learningTask);
     }
+    await Promise.all(followUpTasks);
+    const automaticFilterCount = learningTask ? await learningTask : 0;
     return NextResponse.json({ saved: saved ?? { ...body, mode: "demo" }, automaticFilterCount });
   } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Failed" }, { status: 500 }); }
 }

@@ -3,6 +3,7 @@ import type { RunConfig } from "./pipeline";
 
 export function applyManualRunLimits(config: RunConfig, queries: string[]) {
   const sourceEntries = Object.entries(config.sources ?? {
+    appreview: true,
     naverCafe: true,
     naverKin: true,
     naverBlog: true,

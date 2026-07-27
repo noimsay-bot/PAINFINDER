@@ -5,6 +5,7 @@ import { rejectionReasonLabel, normalizeRejectionReasonCategory } from "@/lib/le
 import { isRecentlyRejected, shouldHideRejectedFromToday } from "@/lib/candidate-visibility";
 import { compactPainSummary, DEFAULT_REVIEW_QUEUE_MIN_SCORE, DEFAULT_REVIEW_QUEUE_SIZE } from "@/lib/review-queue";
 import { parseNaverCafeId } from "@/lib/watched-cafes";
+import { sameAppPain } from "@/lib/app-reviews";
 
 type Row = Record<string, unknown>;
 
@@ -23,11 +24,11 @@ function relativeTime(value: unknown) {
 }
 
 function sourceLabel(source: string) {
-  return ({ cafearticle: "네이버 카페", kin: "지식iN", blog: "네이버 블로그", webkr: "웹문서", appstore: "앱 리뷰", threads: "Threads", hn: "HN" } as Record<string, string>)[source] ?? source;
+  return ({ cafearticle: "네이버 카페", kin: "지식iN", blog: "네이버 블로그", webkr: "웹문서", appstore: "앱 리뷰", playstore: "앱 리뷰", threads: "Threads", hn: "HN" } as Record<string, string>)[source] ?? source;
 }
 
 function sourceTone(source: string) {
-  return ({ cafearticle: "cafe", kin: "kin", blog: "blog", appstore: "app", threads: "threads", hn: "hn" } as Record<string, string>)[source] ?? "web";
+  return ({ cafearticle: "cafe", kin: "kin", blog: "blog", appstore: "app", playstore: "app", threads: "threads", hn: "hn" } as Record<string, string>)[source] ?? "web";
 }
 
 function marketVerdict(value: unknown): MarketVerdict {
@@ -43,7 +44,7 @@ function marketPriority(verdict: MarketVerdict) {
 export async function GET() {
   try {
     const [painRows, logRows, reviewSettingRows, activeWatchedRows] = await Promise.all([
-      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
+      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,app_target_id,app_name,review_platform,review_score,app_version,incumbent_dissatisfaction,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
       supabaseRest("run_logs?select=id,started_at,ended_at,stage_counts,llm_calls,cost_estimate,stopped_reason,errors,run_configs(name)&order=started_at.desc&limit=50"),
       supabaseRest("review_settings?id=eq.1&select=queue_size,min_score&limit=1"),
       supabaseRest("watched_cafes?active=eq.true&select=cafe_id,cafe_name"),
@@ -72,6 +73,7 @@ export async function GET() {
       const legacyScore = (score.f2 !== null && score.f2 !== undefined) || (score.f3 !== null && score.f3 !== undefined);
       const precisionVerified = Boolean(row.precision_verified_at);
       const incumbentScore = score.f4 === null || score.f4 === undefined ? null : Number(score.f4);
+      const incumbentKnown = Boolean(raw.incumbent_dissatisfaction);
       const storedTotal = Number(score.total ?? 0);
       const reasonCategory = normalizeRejectionReasonCategory(latest.reason_category);
       const reasonLabel = rejectionReasonLabel(reasonCategory) ?? String(latest.reason ?? "");
@@ -89,12 +91,13 @@ export async function GET() {
         summary,
         compactSummary: compactPainSummary(who, summary),
         who,
+        sourceKey: source,
         source: sourceLabel(source),
         sourceTone: sourceTone(source),
         time: relativeTime(raw.posted_at ?? row.created_at),
         postedAt: raw.posted_at ? String(raw.posted_at) : null,
-        score: precisionVerified ? storedTotal : Math.max(0, storedTotal - (incumbentScore ?? 0)),
-        scoreMax: precisionVerified ? (legacyScore ? 12 : 10) : (legacyScore ? 9 : 7),
+        score: precisionVerified || incumbentKnown ? storedTotal : Math.max(0, storedTotal - (incumbentScore ?? 0)),
+        scoreMax: precisionVerified ? (legacyScore ? 12 : 10) : incumbentKnown ? (legacyScore ? 11 : 9) : (legacyScore ? 9 : 7),
         competitors: rivals.length,
         paidCompetitors: rivals.filter(rival => rival.pricing === "paid" || rival.pricing === "freemium").length,
         marketVerdict: precisionVerified ? marketVerdict(score.verdict) : "unverified",
@@ -119,6 +122,14 @@ export async function GET() {
         promotionalRuleFlagged: Boolean(raw.promotional_rule_flagged),
         highlightTerms: Array.isArray(raw.highlight_terms) ? raw.highlight_terms.map(String) : [],
         sourceName: raw.source_name ? String(raw.source_name) : null,
+        isAppReview: source === "appstore" || source === "playstore",
+        appTargetId: raw.app_target_id === null || raw.app_target_id === undefined ? null : String(raw.app_target_id),
+        appName: raw.app_name ? String(raw.app_name) : null,
+        reviewPlatform: raw.review_platform ? String(raw.review_platform) : null,
+        reviewScore: raw.review_score === null || raw.review_score === undefined ? null : Number(raw.review_score),
+        appVersion: raw.app_version ? String(raw.app_version) : null,
+        incumbentDissatisfaction: Boolean(raw.incumbent_dissatisfaction),
+        crossPlatform: false,
         watched: Boolean(watchedCafe),
         watchedCafeId: watchedCafe?.cafeId ?? null,
         watchedCafeName: watchedCafe?.cafeName ?? (raw.source_name ? String(raw.source_name) : null),
@@ -134,7 +145,7 @@ export async function GET() {
         access: Boolean(score.data_access_stable),
         scores: [
           { label: "AI 대체 불가성", value: Number(score.f1 ?? 0), max: 2 },
-          { label: "인컴번트 상태", value: precisionVerified ? incumbentScore : null, max: 3 },
+          { label: "인컴번트 상태", value: precisionVerified || incumbentKnown ? incumbentScore : null, max: 3 },
           { label: "지불 의향", value: Number(score.f5 ?? 0), max: 3 },
           { label: "유지보수 부담", value: Number(score.f6 ?? 0), max: 2 },
         ],
@@ -158,13 +169,30 @@ export async function GET() {
         || b.createdAt.localeCompare(a.createdAt)
       );
 
+    for (const candidate of candidates) {
+      if (!candidate.isAppReview || !candidate.appTargetId || !candidate.reviewPlatform) continue;
+      candidate.crossPlatform = candidates.some(other =>
+        other.id !== candidate.id
+        && other.appTargetId === candidate.appTargetId
+        && Boolean(other.reviewPlatform)
+        && other.reviewPlatform !== candidate.reviewPlatform
+        && sameAppPain(candidate.summary, other.summary)
+      );
+    }
+
+    const sourcePerformance = Object.fromEntries([...new Set(candidates.map(candidate => candidate.sourceKey))].map(source => {
+      const relevant = candidates.filter(candidate => candidate.sourceKey === source);
+      const tracked = relevant.filter(candidate => candidate.decision === "tracking").length;
+      return [source, { candidates: relevant.length, tracked, trackingRate: relevant.length ? tracked / relevant.length : 0 }];
+    }));
+
     const logs = (logRows ?? []).map((row) => ({
       id: String(row.id),
       startedAt: String(row.started_at ?? ""),
       endedAt: row.ended_at ? String(row.ended_at) : null,
       preset: String(one(row.run_configs).name ?? "기본 실행"),
       status: row.ended_at ? (row.stopped_reason ? "stopped" : "completed") : "running",
-      stageCounts: (row.stage_counts as Row | null) ?? {},
+      stageCounts: { ...((row.stage_counts as Row | null) ?? {}), source_tracking_rates: sourcePerformance },
       llmCalls: (row.llm_calls as Row | null) ?? {},
       cost: Number(row.cost_estimate ?? 0),
       stoppedReason: row.stopped_reason ? String(row.stopped_reason) : null,

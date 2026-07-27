@@ -90,7 +90,7 @@ test("광고 판정·소스 비중·스니펫 신뢰도와 대체 링크를 코�
   ]);
   assert.match(pipeline, /is_promotional=true이면 반드시 pass=false/);
   assert.match(pipeline, /promotional:\s*rejectReasonCounts\.promotional/);
-  assert.match(pipeline, /kin:\s*35[\s\S]*blog:\s*30[\s\S]*cafearticle:\s*35/);
+  assert.match(pipeline, /appreview:\s*40[\s\S]*blog:\s*20[\s\S]*kin:\s*10[\s\S]*cafearticle:\s*15[\s\S]*threads:\s*15/);
   assert.match(pipeline, /source_counts/);
   assert.match(page, /원문 스니펫 전문/);
   assert.match(page, /네이버에서 검색/);
@@ -125,9 +125,14 @@ test("24시간 숨김·재처리 차단·사유 기반 필터 이력과 취소�
   assert.match(pipeline, /excludeByActiveKeywordFilters/);
   assert.match(decisions, /reasonCategory === "not_painpoint"/);
   assert.match(decisions, /reasonCategory === "out_of_interest"/);
+  assert.match(decisions, /const \[painRows, saved\] = await Promise\.all/);
+  assert.match(decisions, /await Promise\.all\(followUpTasks\)/);
+  assert.match(page, /pendingDecisionIds\.current\.add\(targetId\)[\s\S]*setItems\(prev => prev\.map/);
   assert.doesNotMatch(decisions, /reasonCategory === "already_solved"/);
   assert.match(learning, /body\.action === "revoke-filter"/);
   assert.match(filters, /revoked_at: new Date\(\)\.toISOString\(\)/);
+  assert.match(filters, /rule_exclusions\?on_conflict=kind,value/);
+  assert.match(filters, /const \[rows\] = await Promise\.all/);
   assert.match(page, /자동 반영됨/);
   assert.match(page, /반영 취소/);
   assert.match(schema, /create table if not exists filter_additions/);

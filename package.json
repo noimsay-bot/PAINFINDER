@@ -10,7 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
-    "test:llm": "tsx --test tests/llm-provider.test.ts tests/competitors.test.ts tests/scoring.test.ts tests/run-stability.test.ts tests/rule-filter.test.ts tests/promotional-source.test.ts tests/rejection-filtering.test.ts tests/watched-cafes.test.ts tests/review-queue.test.ts",
+    "test:llm": "tsx --test tests/llm-provider.test.ts tests/competitors.test.ts tests/scoring.test.ts tests/run-stability.test.ts tests/rule-filter.test.ts tests/promotional-source.test.ts tests/rejection-filtering.test.ts tests/watched-cafes.test.ts tests/review-queue.test.ts tests/app-reviews.test.ts",
     "test:discovery": "tsx --test tests/discovery.test.ts",
     "validate:precision": "node --env-file=.env.local --import tsx scripts/validate-precision.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
+    "google-play-scraper": "^10.1.3",
     "next": "16.2.6",
     "openai": "^6.48.0",
     "react": "19.2.6",

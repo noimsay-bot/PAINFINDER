@@ -28,7 +28,7 @@ const PUBLIC_DOWNLOAD_PATH = /(download|exldown|getlist|\.pdf(?:$|[?#]))/i;
 
 export type CompetitorPricing = "free" | "freemium" | "paid" | "public" | "unknown";
 export type MarketVerdict = "unverified" | "empty" | "all_free" | "public_owned" | "paid_exists" | "crowded";
-export type CompetitorSource = "appstore" | "web";
+export type CompetitorSource = "appstore" | "playstore" | "web";
 
 export type SearchCandidate = { title: string; snippet: string; url: string; reviewLike: boolean };
 export type ProductCompetitor = {

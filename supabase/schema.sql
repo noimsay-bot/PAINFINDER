@@ -12,7 +12,7 @@ create table if not exists run_configs (
   domains jsonb not null default '[]'::jsonb,
   excluded_domains jsonb not null default '["연예","정치","스포츠"]'::jsonb,
   sources jsonb not null default '{}'::jsonb,
-  source_weights jsonb not null default '{"kin":35,"blog":30,"cafearticle":35,"webkr":0}'::jsonb,
+  source_weights jsonb not null default '{"appreview":40,"blog":20,"kin":10,"cafearticle":15,"threads":15,"webkr":0}'::jsonb,
   period_days integer not null default 7,
   auto_verify_top_n integer not null default 10 check (auto_verify_top_n between 0 and 40),
   app_list jsonb not null default '[]'::jsonb,
@@ -159,8 +159,30 @@ create table if not exists watched_cafes (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists review_apps (
+  id bigint generated always as identity primary key,
+  name text not null,
+  ios_app_id text,
+  android_package text,
+  ios_url text,
+  android_url text,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (ios_app_id is not null or android_package is not null)
+);
+
+create unique index if not exists review_apps_ios_id_unique on review_apps(ios_app_id) where ios_app_id is not null;
+create unique index if not exists review_apps_android_package_unique on review_apps(android_package) where android_package is not null;
+
 alter table raw_items add column if not exists watched boolean not null default false;
 alter table raw_items add column if not exists watched_cafe_id text references watched_cafes(cafe_id) on delete set null;
+alter table raw_items add column if not exists app_target_id bigint references review_apps(id) on delete set null;
+alter table raw_items add column if not exists app_name text;
+alter table raw_items add column if not exists review_platform text check (review_platform in ('ios','android'));
+alter table raw_items add column if not exists review_score smallint check (review_score between 1 and 5);
+alter table raw_items add column if not exists app_version text;
+alter table raw_items add column if not exists incumbent_dissatisfaction boolean not null default false;
 
 create table if not exists query_discoveries (
   id bigint generated always as identity primary key,
@@ -224,6 +246,7 @@ alter table rule_exclusions enable row level security;
 alter table filter_additions enable row level security;
 alter table watched_cafes enable row level security;
 alter table review_settings enable row level security;
+alter table review_apps enable row level security;
 
 create index if not exists pain_points_cluster_idx on pain_points(cluster_id);
 create index if not exists pain_points_recurrence_idx on pain_points(recurrence_count desc);
@@ -234,7 +257,9 @@ create index if not exists rule_exclusions_active_idx on rule_exclusions(active,
 create index if not exists filter_additions_active_idx on filter_additions(active, kind, added_at desc);
 create index if not exists filter_additions_origin_idx on filter_additions(origin_pain_point_id, added_at desc);
 create index if not exists watched_cafes_active_idx on watched_cafes(active, created_at);
+create index if not exists review_apps_active_idx on review_apps(active, created_at);
 create index if not exists raw_items_watched_idx on raw_items(watched, watched_cafe_id, collected_at desc);
+create index if not exists raw_items_app_review_idx on raw_items(app_target_id, review_platform, collected_at desc);
 create index if not exists raw_items_review_status_idx on raw_items(review_status, review_override, collected_at desc);
 create index if not exists query_discoveries_pending_idx on query_discoveries(origin, approved_at, frequency desc);
 create index if not exists industry_seeds_round_robin_idx on industry_seeds(done, created_at, id);

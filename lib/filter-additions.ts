@@ -23,39 +23,27 @@ type FilterAdditionRow = {
 export async function addActiveFilter(input: FilterAdditionInput) {
   const keyword = input.keyword.replace(/\s+/g, " ").trim().slice(0, 240);
   if (!keyword) return null;
-  const rows = await supabaseRest("filter_additions?on_conflict=kind,keyword,mode&select=id,keyword,kind,source_reason,mode,active", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
-    body: JSON.stringify({
-      keyword,
-      kind: input.kind,
-      source_reason: input.sourceReason,
-      mode: input.mode,
-      origin_pain_point_id: input.originPainPointId,
-      active: true,
-      revoked_at: null,
-      added_at: new Date().toISOString(),
-    }),
-  }) as FilterAdditionRow[] | null;
-  const existingRules = await supabaseRest(
-    `rule_exclusions?kind=eq.${encodeURIComponent(input.kind)}&value=eq.${encodeURIComponent(keyword)}&select=id&limit=1`,
-  ) as Array<{ id: number }> | null;
-  if (existingRules?.[0]) {
-    await supabaseRest(`rule_exclusions?id=eq.${existingRules[0].id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ active: true }),
-    });
-  } else {
-    await supabaseRest("rule_exclusions", {
+  const [rows] = await Promise.all([
+    supabaseRest("filter_additions?on_conflict=kind,keyword,mode&select=id,keyword,kind,source_reason,mode,active", {
       method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
       body: JSON.stringify({
+        keyword,
         kind: input.kind,
-        value: keyword,
-        source: input.mode === "auto" ? "decision_auto" : "decision_learning",
+        source_reason: input.sourceReason,
+        mode: input.mode,
+        origin_pain_point_id: input.originPainPointId,
         active: true,
+        revoked_at: null,
+        added_at: new Date().toISOString(),
       }),
-    });
-  }
+    }) as Promise<FilterAdditionRow[] | null>,
+    supabaseRest("rule_exclusions?on_conflict=kind,value", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify({ kind: input.kind, value: keyword, source: input.mode === "auto" ? "decision_auto" : "decision_learning", active: true }),
+    }),
+  ]);
   return rows?.[0] ?? null;
 }
 
