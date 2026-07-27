@@ -9,6 +9,19 @@ import { sameAppPain } from "@/lib/app-reviews";
 
 type Row = Record<string, unknown>;
 
+const PAIN_POINT_SELECT = "pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,app_target_id,app_name,review_platform,review_score,app_version,incumbent_dissatisfaction,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500";
+const LEGACY_PAIN_POINT_SELECT = "pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500";
+
+async function fetchPainRows() {
+  try {
+    return await supabaseRest(PAIN_POINT_SELECT) as Row[] | null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!/app_target_id|app_name|review_platform|review_score|app_version|incumbent_dissatisfaction|PGRST/i.test(message)) throw error;
+    return await supabaseRest(LEGACY_PAIN_POINT_SELECT) as Row[] | null;
+  }
+}
+
 function one(value: unknown): Row {
   if (Array.isArray(value)) return (value[0] as Row | undefined) ?? {};
   return (value as Row | null) ?? {};
@@ -44,7 +57,7 @@ function marketPriority(verdict: MarketVerdict) {
 export async function GET() {
   try {
     const [painRows, logRows, reviewSettingRows, activeWatchedRows] = await Promise.all([
-      supabaseRest("pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,app_target_id,app_name,review_platform,review_score,app_version,incumbent_dissatisfaction,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500"),
+      fetchPainRows(),
       supabaseRest("run_logs?select=id,started_at,ended_at,stage_counts,llm_calls,cost_estimate,stopped_reason,errors,run_configs(name)&order=started_at.desc&limit=50"),
       supabaseRest("review_settings?id=eq.1&select=queue_size,min_score&limit=1"),
       supabaseRest("watched_cafes?active=eq.true&select=cafe_id,cafe_name"),
