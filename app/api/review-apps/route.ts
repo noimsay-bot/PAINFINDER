@@ -14,13 +14,23 @@ function normalizeName(value: unknown) {
   return clean(value, 160).toLocaleLowerCase("ko-KR").replace(/[^a-z0-9가-힣]/g, "");
 }
 
+async function loadApps(selectSuffix = "&order=created_at.asc"): Promise<Row[] | null> {
+  try {
+    return await supabaseRest(`review_apps?select=id,name,category,ios_app_id,android_package,ios_url,android_url,active,created_at,updated_at${selectSuffix}`) as Row[] | null;
+  } catch (error) {
+    if (!/category/i.test(error instanceof Error ? error.message : String(error))) throw error;
+    const rows = await supabaseRest(`review_apps?select=id,name,ios_app_id,android_package,ios_url,android_url,active,created_at,updated_at${selectSuffix}`) as Row[] | null;
+    return (rows ?? []).map((row): Row => ({ ...row, category: "미분류" }));
+  }
+}
+
 export async function GET(request: Request) {
   try {
     const query = new URL(request.url).searchParams.get("query")?.trim();
     if (query) return NextResponse.json(await searchReviewApps(query));
 
     const [apps, rawRows] = await Promise.all([
-      supabaseRest("review_apps?select=id,name,ios_app_id,android_package,ios_url,android_url,active,created_at,updated_at&order=created_at.asc") as Promise<Row[] | null>,
+      loadApps(),
       supabaseRest("raw_items?source=in.(appstore,playstore)&select=app_target_id,status,pain_points(decisions(action))&order=collected_at.desc&limit=10000") as Promise<Row[] | null>,
     ]);
     const appRows = (apps ?? []).map(app => {
@@ -33,6 +43,7 @@ export async function GET(request: Request) {
       return {
         id: Number(app.id),
         name: String(app.name),
+        category: String(app.category ?? "미분류"),
         iosId: app.ios_app_id ? String(app.ios_app_id) : null,
         androidPackage: app.android_package ? String(app.android_package) : null,
         iosUrl: app.ios_url ? String(app.ios_url) : null,
@@ -52,11 +63,19 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { action?: string; id?: number; active?: boolean; platform?: "ios" | "android"; name?: string; appId?: string; url?: string };
+    const body = await request.json() as { action?: string; id?: number; active?: boolean; platform?: "ios" | "android"; name?: string; appId?: string; url?: string; category?: string };
     if (body.action === "toggle") {
       const id = Number(body.id);
       if (!Number.isFinite(id)) return NextResponse.json({ error: "앱 ID가 필요합니다." }, { status: 400 });
       await supabaseRest(`review_apps?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ active: Boolean(body.active), updated_at: new Date().toISOString() }) });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (body.action === "category") {
+      const id = Number(body.id);
+      const category = clean(body.category, 80) || "미분류";
+      if (!Number.isFinite(id)) return NextResponse.json({ error: "앱 ID가 필요합니다." }, { status: 400 });
+      await supabaseRest(`review_apps?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ category, updated_at: new Date().toISOString() }) });
       return NextResponse.json({ ok: true });
     }
 
@@ -68,7 +87,7 @@ export async function POST(request: Request) {
     const url = clean(body.url, 500);
     if (!name || !appId) return NextResponse.json({ error: "앱 이름과 ID가 필요합니다." }, { status: 400 });
 
-    const current = await supabaseRest("review_apps?select=id,name,ios_app_id,android_package,ios_url,android_url,active&limit=1000") as Row[] | null;
+    const current = await loadApps("&limit=1000");
     const existing = (current ?? []).find(app =>
       (body.platform === "ios" && String(app.ios_app_id ?? "") === appId)
       || (body.platform === "android" && String(app.android_package ?? "") === appId)
@@ -77,12 +96,17 @@ export async function POST(request: Request) {
     const fields = body.platform === "ios"
       ? { ios_app_id: appId, ios_url: url || `https://apps.apple.com/kr/app/id${appId}` }
       : { android_package: appId, android_url: url || `https://play.google.com/store/apps/details?id=${encodeURIComponent(appId)}` };
-    const payload = { name: existing ? String(existing.name) : name, ...fields, active: true, updated_at: new Date().toISOString() };
-    const saved = await supabaseRest(existing ? `review_apps?id=eq.${Number(existing.id)}` : "review_apps", {
-      method: existing ? "PATCH" : "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify(payload),
-    });
+    const payload = { name: existing ? String(existing.name) : name, category: clean(body.category, 80) || String(existing?.category ?? "미분류"), ...fields, active: true, updated_at: new Date().toISOString() };
+    const endpoint = existing ? `review_apps?id=eq.${Number(existing.id)}` : "review_apps";
+    const requestInit = { method: existing ? "PATCH" : "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(payload) };
+    let saved: unknown;
+    try {
+      saved = await supabaseRest(endpoint, requestInit);
+    } catch (error) {
+      if (!/category/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      const legacyPayload = Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "category"));
+      saved = await supabaseRest(endpoint, { ...requestInit, body: JSON.stringify(legacyPayload) });
+    }
     return NextResponse.json({ ok: true, saved: saved ?? payload });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "대상 앱을 저장하지 못했습니다." }, { status: 500 });

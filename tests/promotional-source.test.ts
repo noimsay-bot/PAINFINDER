@@ -29,9 +29,9 @@ test("LLM이 광고로 판정하면 pass 응답이 와도 promotional 기각으�
   );
 });
 
-test("축소된 네이버 소스끼리만 켜도 10 · 20 · 15 비율을 유지한다", () => {
+test("명시적으로 되살린 네이버 소스는 지정 비율을 유지한다", () => {
   assert.deepEqual(
-    allocateSourceTargets(100, ["kin", "blog", "cafearticle"]),
+    allocateSourceTargets(100, ["kin", "blog", "cafearticle"], { kin: 10, blog: 20, cafearticle: 15 }),
     { kin: 22, blog: 45, cafearticle: 33 },
   );
 });

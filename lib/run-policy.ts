@@ -4,9 +4,8 @@ import type { RunConfig } from "./pipeline";
 export function applyManualRunLimits(config: RunConfig, queries: string[]) {
   const sourceEntries = Object.entries(config.sources ?? {
     appreview: true,
-    naverCafe: true,
-    naverKin: true,
-    naverBlog: true,
+    threads: true,
+    hn: true,
   }).filter(([, enabled]) => enabled);
   const selectedSources = sourceEntries.slice(0, MANUAL_RUN_LIMITS.MAX_SOURCES);
   const requestedItems = config.limits?.itemsPerSource ?? MANUAL_RUN_LIMITS.ITEMS_PER_SOURCE;

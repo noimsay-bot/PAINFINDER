@@ -1,22 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { effectiveSourceWeights, allocateSourceTargets, buildStage1Prompt } from "../lib/pipeline";
+import { effectiveSourceWeights, allocateSourceTargets, buildStage1Prompt, isNaverCollectionEnabled, isThreadsApprovalPending } from "../lib/pipeline";
 import { hasIncumbentDissatisfaction, isPlayBlockError, isPlayScrapeEnabled, sameAppPain } from "../lib/app-reviews";
 import { calculateFourScores } from "../lib/scoring";
 
-test("앱 리뷰를 40% 주력 소스로 배분한다", () => {
-  const weights = effectiveSourceWeights({}, true);
+test("Threads 키워드 승인 전 앱 리뷰 85%·HN 15%로 배분한다", () => {
+  const weights = effectiveSourceWeights({}, false);
   assert.deepEqual(
-    allocateSourceTargets(100, ["appreview", "blog", "kin", "cafearticle", "threads"], weights),
-    { appreview: 40, blog: 20, kin: 10, cafearticle: 15, threads: 15 },
+    allocateSourceTargets(100, ["appreview", "hn"], weights),
+    { appreview: 85, hn: 15 },
   );
 });
 
-test("Threads 미연결 15%는 앱 리뷰 10%와 블로그 5%로 재배분한다", () => {
-  const weights = effectiveSourceWeights({}, false);
-  assert.equal(weights.threads, 0);
-  assert.equal(weights.appreview, 50);
-  assert.equal(weights.blog, 25);
+test("Threads 키워드 승인 후 Threads·앱 리뷰 45%와 HN 10%로 배분한다", () => {
+  const weights = effectiveSourceWeights({}, true);
+  assert.deepEqual(
+    allocateSourceTargets(100, ["appreview", "threads", "hn"], weights),
+    { appreview: 45, threads: 45, hn: 10 },
+  );
+});
+
+test("네이버는 명시적 환경 설정에서만 다시 활성화된다", () => {
+  assert.equal(isNaverCollectionEnabled(undefined), false);
+  assert.equal(isNaverCollectionEnabled("false"), false);
+  assert.equal(isNaverCollectionEnabled("true"), true);
+});
+
+test("Threads 권한 오류는 승인 대기 신호로 분류한다", () => {
+  assert.equal(isThreadsApprovalPending(403, { error: { message: "Missing permission threads_keyword_search" } }), true);
+  assert.equal(isThreadsApprovalPending(400, { error: { message: "Application needs approval" } }), true);
+  assert.equal(isThreadsApprovalPending(500, { error: { message: "server error" } }), false);
 });
 
 test("Google Play 수집은 기본 활성이고 명시적 false에서만 꺼진다", () => {

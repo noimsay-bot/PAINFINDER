@@ -11,7 +11,6 @@ import {
   type ReviewSettings,
   type ReviewStatus,
 } from "@/lib/review-queue";
-import { parseNaverCafeId } from "@/lib/watched-cafes";
 
 type View = "today" | "signals" | "discovery" | "settings" | "archive" | "logs";
 type Decision = "unreviewed" | "tracking" | "holding" | "rejected";
@@ -99,7 +98,7 @@ type RunLog = {
 const NAV: { id: View; label: string; mark: string; count?: number }[] = [
   { id: "today", label: "오늘의 후보", mark: "01" },
   { id: "signals", label: "반복 신호", mark: "02" },
-  { id: "discovery", label: "주목 카페·발굴", mark: "03" },
+  { id: "discovery", label: "검색어 발굴", mark: "03" },
   { id: "settings", label: "실행 설정", mark: "04" },
   { id: "archive", label: "보류함", mark: "05" },
   { id: "logs", label: "실행 로그", mark: "06" },
@@ -231,7 +230,6 @@ export default function Home() {
   const [selectedId, setSelectedId] = useState("");
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("전체 소스");
-  const [watchedOnly, setWatchedOnly] = useState(false);
   const [queueMode, setQueueMode] = useState<"queue" | "all">("queue");
   const [reviewSettings, setReviewSettings] = useState<ReviewSettings>({
     queueSize: DEFAULT_REVIEW_QUEUE_SIZE,
@@ -244,8 +242,6 @@ export default function Home() {
   const [dataError, setDataError] = useState("");
   const [setupRequired, setSetupRequired] = useState(false);
   const [verifyingId, setVerifyingId] = useState("");
-  const [watchingCandidateId, setWatchingCandidateId] = useState("");
-  const [watchToast, setWatchToast] = useState<{ message: string; active: boolean } | null>(null);
   const [visibilityNow, setVisibilityNow] = useState(() => Date.now());
   const pendingDecisionIds = useRef(new Set<string>());
 
@@ -278,9 +274,8 @@ export default function Home() {
   const todayReviewedCount = useMemo(() => items.filter(item => reviewedToday(item)).length, [items]);
   const visible = useMemo(() => (queueMode === "queue" ? reviewQueue.queue : todayItems).filter(item =>
     (sourceFilter === "전체 소스" || item.source === sourceFilter) &&
-    (!watchedOnly || item.watched) &&
     (item.summary.includes(search) || item.domain.includes(search) || item.who.includes(search))
-  ), [queueMode, reviewQueue.queue, todayItems, search, sourceFilter, watchedOnly]);
+  ), [queueMode, reviewQueue.queue, todayItems, search, sourceFilter]);
   const selected = visible.find(i => i.id === selectedId) ?? visible[0] ?? items.find(i => i.id === selectedId) ?? items[0];
 
   const verifyCandidate = useCallback(async (painPointId: string) => {
@@ -364,55 +359,6 @@ export default function Home() {
     }
   }, [loadDashboard]);
 
-  const toggleCandidateCafe = useCallback(async () => {
-    if (!selected?.id || !selected.isCafe || watchingCandidateId) return;
-    setWatchingCandidateId(selected.id);
-    try {
-      const response = await fetch("/api/watched-cafes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "quick_toggle", painPointId: selected.id }),
-      });
-      const result = await response.json() as {
-        error?: string;
-        active?: boolean;
-        cafeId?: string;
-        cafeName?: string;
-        topicSeeds?: string[];
-      };
-      if (!response.ok || !result.cafeId) throw new Error(result.error ?? "카페 주목 상태를 바꾸지 못했습니다.");
-      const active = Boolean(result.active);
-      const normalizedCafeId = result.cafeId.toLocaleLowerCase("ko-KR");
-      setItems(current => current.map(item => {
-        const itemCafeId = item.isCafe ? parseNaverCafeId(item.url)?.toLocaleLowerCase("ko-KR") : null;
-        if (itemCafeId !== normalizedCafeId) return item;
-        return {
-          ...item,
-          watched: active,
-          watchedCafeId: active ? result.cafeId! : null,
-          watchedCafeName: active ? (result.cafeName ?? result.cafeId!) : item.sourceName,
-        };
-      }));
-      setWatchToast({
-        active,
-        message: active
-          ? `${result.cafeName ?? result.cafeId} 카페를 주목 목록에 추가했습니다`
-          : `${result.cafeName ?? result.cafeId} 카페 주목을 해제했습니다`,
-      });
-      setDataError("");
-    } catch (error) {
-      setDataError(error instanceof Error ? error.message : "카페 주목 상태를 바꾸지 못했습니다.");
-    } finally {
-      setWatchingCandidateId("");
-    }
-  }, [selected, watchingCandidateId]);
-
-  useEffect(() => {
-    if (!watchToast) return;
-    const timer = window.setTimeout(() => setWatchToast(null), 6000);
-    return () => window.clearTimeout(timer);
-  }, [watchToast]);
-
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (view !== "today" || ["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement).tagName)) return;
@@ -423,17 +369,16 @@ export default function Home() {
       if (event.key.toLowerCase() === "h") void decide("holding");
       if (event.key.toLowerCase() === "x") setRejecting(true);
       if (event.key.toLowerCase() === "v" && selected?.id) void verifyCandidate(selected.id);
-      if (event.key.toLowerCase() === "w" && selected?.isCafe) void toggleCandidateCafe();
       if (event.key === "Enter" && selected?.url) window.open(selected.url, "_blank", "noopener,noreferrer");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [view, visible, selectedId, selected?.id, selected?.url, selected?.isCafe, verifyCandidate, toggleCandidateCafe, decide]);
+  }, [view, visible, selectedId, selected?.id, selected?.url, verifyCandidate, decide]);
 
   const titles: Record<View, [string, string]> = {
     today: ["오늘의 후보", "경쟁 검증을 통과한 신호부터 검토하세요."],
     signals: ["반복 신호", "서로 다른 시점과 출처에서 다시 나타난 문제입니다."],
-    discovery: ["주목 카페·검색어 발굴", "가입한 카페를 조준하고, 수집 데이터와 업종 사전에서 검색어 후보를 찾습니다."],
+    discovery: ["검색어 발굴", "통과 원문과 업종 사전에서 검색어 후보를 찾습니다."],
     settings: ["실행 설정", "검색어, 수집 소스, 비용 상한을 정하고 바로 실행합니다."],
     archive: ["보류함", "판단 기준이 바뀌면 언제든 다시 검토할 수 있습니다."],
     logs: ["실행 로그", "어디서 걸러졌고 왜 멈췄는지 숨김없이 보여줍니다."],
@@ -451,20 +396,19 @@ export default function Home() {
           <div className="meter"><i style={{ width: `${reviewSettings.queueSize ? Math.min(100, reviewQueue.queue.length / reviewSettings.queueSize * 100) : 0}%` }} /></div>
           <button onClick={() => setView("settings")}><span>▶</span> 지금 실행</button>
         </div>
-        <div className="shortcut-legend"><p>KEYBOARD</p><div><kbd>J</kbd><kbd>K</kbd><span>이동</span></div><div><kbd>T</kbd><span>추적</span><kbd>H</kbd><span>보류</span></div><div><kbd>X</kbd><span>기각</span><kbd>V</kbd><span>검증</span></div><div><kbd>W</kbd><span>카페 주목</span><kbd>↵</kbd><span>원문</span></div></div>
+        <div className="shortcut-legend"><p>KEYBOARD</p><div><kbd>J</kbd><kbd>K</kbd><span>이동</span></div><div><kbd>T</kbd><span>추적</span><kbd>H</kbd><span>보류</span></div><div><kbd>X</kbd><span>기각</span><kbd>V</kbd><span>검증</span></div><div><kbd>↵</kbd><span>원문</span></div></div>
       </aside>
 
       <section className="workspace">
         <Topbar title={titles[view][0]} subtitle={titles[view][1]} dark={dark} setDark={setDark} />
-        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} reviewQueue={reviewQueue} todayReviewedCount={todayReviewedCount} reviewSettings={reviewSettings} queueMode={queueMode} setQueueMode={setQueueMode} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} watchedOnly={watchedOnly} setWatchedOnly={setWatchedOnly} onDecision={decide} onHoldDomain={holdDomain} onToggleCafe={toggleCandidateCafe} watchingCandidateId={watchingCandidateId} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
+        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} reviewQueue={reviewQueue} todayReviewedCount={todayReviewedCount} reviewSettings={reviewSettings} queueMode={queueMode} setQueueMode={setQueueMode} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} onHoldDomain={holdDomain} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
         {view === "signals" && <SignalsView items={todayItems} onOpen={(id) => { setSelectedId(id); setView("today"); }} />}
-        {view === "discovery" && <DiscoveryView onRunComplete={loadDashboard} />}
+        {view === "discovery" && <DiscoveryView />}
         {view === "settings" && <SettingsView onRunComplete={loadDashboard} />}
         {view === "archive" && <ArchiveView items={items} onRestore={restoreCandidate} />}
         {view === "logs" && <LogsView runs={logs} />}
       </section>
 
-      {watchToast && <div className="watch-toast" role="status"><span>{watchToast.active ? "★" : "☆"}</span><strong>{watchToast.message}</strong>{watchToast.active && <button onClick={() => { setView("discovery"); setWatchToast(null); }}>주제어 설정 →</button>}</div>}
       {dataError && selected && <div className="error-toast" role="alert"><span>!</span><strong>{dataError}</strong><button onClick={() => setDataError("")} aria-label="오류 닫기">×</button></div>}
 
       <nav className="mobile-nav" aria-label="모바일 메뉴">{NAV.map(n => <button key={n.id} onClick={() => setView(n.id)} className={view === n.id ? "active" : ""}><b>{n.mark}</b><span>{n.label.replace("오늘의 ", "")}</span></button>)}</nav>
@@ -472,8 +416,8 @@ export default function Home() {
   );
 }
 
-function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCount, reviewSettings, queueMode, setQueueMode, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, watchedOnly, setWatchedOnly, onDecision, onHoldDomain, onToggleCafe, watchingCandidateId, onVerify, verifyingId, rejecting, setRejecting, rejectCategory, setRejectCategory, rejectNote, setRejectNote }: {
-  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; reviewQueue: ReturnType<typeof buildReviewQueue<Candidate>>; todayReviewedCount: number; reviewSettings: ReviewSettings; queueMode: "queue" | "all"; setQueueMode: (mode: "queue" | "all") => void; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; watchedOnly: boolean; setWatchedOnly: (v: boolean) => void; onDecision: (d: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => Promise<void>; onHoldDomain: (domain: string) => Promise<void>; onToggleCafe: () => Promise<void>; watchingCandidateId: string; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectCategory: RejectionReasonCategory | ""; setRejectCategory: (v: RejectionReasonCategory | "") => void; rejectNote: string; setRejectNote: (v: string) => void;
+function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCount, reviewSettings, queueMode, setQueueMode, lastRun, setSelectedId, search, setSearch, sourceFilter, setSourceFilter, onDecision, onHoldDomain, onVerify, verifyingId, rejecting, setRejecting, rejectCategory, setRejectCategory, rejectNote, setRejectNote }: {
+  allItems: Candidate[]; visible: Candidate[]; selected: Candidate; reviewQueue: ReturnType<typeof buildReviewQueue<Candidate>>; todayReviewedCount: number; reviewSettings: ReviewSettings; queueMode: "queue" | "all"; setQueueMode: (mode: "queue" | "all") => void; lastRun?: RunLog; setSelectedId: (id: string) => void; search: string; setSearch: (v: string) => void; sourceFilter: string; setSourceFilter: (v: string) => void; onDecision: (d: Decision, reasonCategory?: RejectionReasonCategory, reasonNote?: string) => Promise<void>; onHoldDomain: (domain: string) => Promise<void>; onVerify: (id: string) => Promise<void>; verifyingId: string; rejecting: boolean; setRejecting: (v: boolean) => void; rejectCategory: RejectionReasonCategory | ""; setRejectCategory: (v: RejectionReasonCategory | "") => void; rejectNote: string; setRejectNote: (v: string) => void;
 }) {
   return <div className="today-layout">
     <section className="candidate-pane">
@@ -491,14 +435,13 @@ function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCoun
       <div className="filter-row">
         <label className="searchbox"><span>⌕</span><input value={search} onChange={e => setSearch(e.target.value)} placeholder="후보 검색" /></label>
         <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)} aria-label="소스 필터"><option>전체 소스</option><option>네이버 카페</option><option>지식iN</option><option>네이버 블로그</option><option>앱 리뷰</option><option>Threads</option></select>
-        <button className={`watched-filter ${watchedOnly ? "active" : ""}`} onClick={() => setWatchedOnly(!watchedOnly)} aria-pressed={watchedOnly}>★ 주목 카페만</button>
         <button className="export-button" onClick={() => downloadCandidatesText(allItems)} disabled={!allItems.length} title="클로드 공유용 TXT 파일로 저장">전체 TXT ↓</button>
       </div>
       <div className="list-head"><span>{queueMode === "queue" ? `검토 큐 ${visible.length}건` : `전체 후보 ${visible.length}건`}</span><small>최근 실행 · {lastRun ? new Date(lastRun.startedAt).toLocaleString("ko-KR") : "없음"}</small></div>
       <div className="candidate-list">
         {visible.map(item => <button key={item.id} className={`candidate-row ${selected.id === item.id ? "selected" : ""} ${item.recentlyRejected ? "recently-rejected" : ""}`} onClick={() => setSelectedId(item.id)}>
           <div className="row-status"><i className={`status-dot ${item.decision}`} /><ScoreGauge score={item.score} max={item.scoreMax} /></div>
-          <div className="row-main"><h3>{item.compactSummary}</h3><div><span className={`source-tag ${item.sourceTone}`}>{item.source}</span>{item.isAppReview && <span className={`platform-badge ${item.reviewPlatform}`}>{item.reviewPlatform === "android" ? "Android" : "iOS"}</span>}{item.crossPlatform && <span className="cross-platform-badge">✓ 교차 확인</span>}{item.watched && <span className="watched-cafe-tag">★ {item.watchedCafeName ?? item.sourceName ?? "주목 카페"}</span>}<span>{item.domain}</span><span>{item.time}</span>{item.recurrence >= 2 && <span className="repeat-tag">↻ {item.recurrence}회 반복</span>}{Boolean(item.duplicateCount) && <span className="merge-tag">유사 {Number(item.duplicateCount) + 1}건 묶음</span>}</div></div>
+          <div className="row-main"><h3>{item.compactSummary}</h3><div><span className={`source-tag ${item.sourceTone}`}>{item.source}</span>{item.isAppReview && <span className={`platform-badge ${item.reviewPlatform}`}>{item.reviewPlatform === "android" ? "Android" : "iOS"}</span>}{item.crossPlatform && <span className="cross-platform-badge">✓ 교차 확인</span>}<span>{item.domain}</span><span>{item.time}</span>{item.recurrence >= 2 && <span className="repeat-tag">↻ {item.recurrence}회 반복</span>}{Boolean(item.duplicateCount) && <span className="merge-tag">유사 {Number(item.duplicateCount) + 1}건 묶음</span>}</div></div>
           <div className={`market-badge ${item.marketVerdict}`}>{marketLabel(item)}</div>
           <span className={`status-label ${item.decision}`}>{STATUS_LABEL[item.decision]}</span>
         </button>)}
@@ -508,15 +451,14 @@ function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCoun
 
     <aside className="detail-pane">
       <div className="detail-scroll">
-        <div className="detail-kicker"><span className={`source-tag ${selected.sourceTone}`}>{selected.source}</span>{selected.isAppReview && <span className={`platform-badge ${selected.reviewPlatform}`}>{selected.reviewPlatform === "android" ? "Android" : "iOS"}</span>}{selected.crossPlatform && <span className="cross-platform-badge">✓ 교차 확인</span>}{selected.watched && <span className="watched-access-badge">가입한 카페 · 원문 열람 가능</span>}{selected.sourceName && <span>{selected.sourceName}</span>}<span>{selected.time}</span><span>ID · PF-{String(selected.id).padStart(4, "0")}</span></div>
+        <div className="detail-kicker"><span className={`source-tag ${selected.sourceTone}`}>{selected.source}</span>{selected.isAppReview && <span className={`platform-badge ${selected.reviewPlatform}`}>{selected.reviewPlatform === "android" ? "Android" : "iOS"}</span>}{selected.crossPlatform && <span className="cross-platform-badge">✓ 교차 확인</span>}{selected.sourceName && <span>{selected.sourceName}</span>}<span>{selected.time}</span><span>ID · PF-{String(selected.id).padStart(4, "0")}</span></div>
         <div className="detail-title"><div><h2>{selected.summary}</h2><p>{selected.who} · {selected.frequency} 발생</p></div><ScoreGauge score={selected.score} max={selected.scoreMax} /></div>
         <section className="detail-section original">
-          <header><h3>{selected.isAppReview ? "원문 리뷰 전문" : "원문 스니펫 전문"}</h3><div className="original-links">{selected.isCafe && <button className={`watch-cafe-action ${selected.watched ? "active" : ""}`} onClick={() => void onToggleCafe()} disabled={watchingCandidateId === selected.id} aria-pressed={selected.watched}><kbd>W</kbd>{watchingCandidateId === selected.id ? "처리 중…" : selected.watched ? "★ 주목 중" : "☆ 이 카페 주목하기"}</button>}<a href={selected.url} target="_blank" rel="noreferrer">{selected.isAppReview ? "스토어 보기" : "원문 보기"} ↗</a>{!selected.isAppReview && <a href={selected.naverSearchUrl} target="_blank" rel="noreferrer">네이버에서 검색 ↗</a>}</div></header>
-          {selected.watched && <a className="watched-original-link" href={selected.url} target="_blank" rel="noreferrer"><span>가입한 카페에서 직접 판단하기</span><strong>원문 크게 보기 ↗</strong></a>}
-          <div className="snippet-meta"><span>{selected.bodyLength}자</span>{selected.reviewScore && <span className="review-score">★ {selected.reviewScore}점</span>}{selected.appVersion && <span>버전 {selected.appVersion}</span>}{selected.postedAt && <time>{selected.isAppReview ? "리뷰일" : "게시일"} {new Date(selected.postedAt).toLocaleDateString("ko-KR")}</time>}{selected.incumbentDissatisfaction && <span className="incumbent-signal">다른 앱 탐색 신호 · 가점</span>}{selected.isCafe && (selected.watched ? <span className="watched-access-badge">가입한 카페 · 원문 열람 가능</span> : <span className="join-warning">카페 가입이 필요할 수 있음</span>)}</div>
+          <header><h3>{selected.isAppReview ? "원문 리뷰 전문" : "원문 스니펫 전문"}</h3><div className="original-links"><a href={selected.url} target="_blank" rel="noreferrer">{selected.isAppReview ? "스토어 보기" : "원문 보기"} ↗</a>{!selected.isAppReview && <a href={selected.naverSearchUrl} target="_blank" rel="noreferrer">네이버에서 검색 ↗</a>}</div></header>
+          <div className="snippet-meta"><span>{selected.bodyLength}자</span>{selected.reviewScore && <span className="review-score">★ {selected.reviewScore}점</span>}{selected.appVersion && <span>버전 {selected.appVersion}</span>}{selected.postedAt && <time>{selected.isAppReview ? "리뷰일" : "게시일"} {new Date(selected.postedAt).toLocaleDateString("ko-KR")}</time>}{selected.incumbentDissatisfaction && <span className="incumbent-signal">다른 앱 탐색 신호 · 가점</span>}</div>
           {selected.isPromotional && <div className="promotion-warning"><strong>광고 의심</strong><span>자동 광고 판정 신호가 있어 사람이 다시 검토해야 합니다.</span></div>}
           {!selected.isPromotional && selected.promotionalRuleFlagged && <div className="promotion-signal"><strong>광고 신호 감지</strong><span>룰 신호는 있었지만 LLM은 현재 페인포인트로 판정했습니다. 원문을 직접 확인하세요.</span></div>}
-          {selected.lowConfidence && <div className="confidence-warning"><strong>{selected.watched ? "원문 확인 필요" : "판단 재료 부족"}</strong><span>{selected.watched ? "스니펫이 짧아도 통과시켰습니다. 가입한 카페 원문에서 직접 판단하세요." : "스니펫이 40자 미만이라 판정 신뢰도가 낮습니다."}</span></div>}
+          {selected.lowConfidence && <div className="confidence-warning"><strong>판단 재료 부족</strong><span>본문이 짧아 판정 신뢰도가 낮습니다.</span></div>}
           <blockquote>“<HighlightText text={selected.excerpt} terms={selected.highlightTerms} />”</blockquote>
         </section>
         <section className="detail-section analysis"><header><h3>LLM 분석</h3><span>구조화 분석 완료</span></header><dl><div><dt>누가</dt><dd>{selected.who}</dd></div><div><dt>무엇을</dt><dd>{selected.summary}</dd></div><div><dt>어떻게 때우는가</dt><dd>{selected.workaround}</dd></div><div><dt>빈도</dt><dd><span className="amber-text">{selected.frequency}</span> · {selected.signal}</dd></div><div><dt>지불 신호</dt><dd>{selected.money ? `“${selected.money}”` : <span className="muted">명시적 신호 없음</span>}</dd></div></dl></section>
@@ -580,8 +522,8 @@ const KSIC_SECTION_LABELS: Record<string, string> = {
   CUSTOM: "카페 입력",
 };
 
-function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }) {
-  const [tab, setTab] = useState<"cafe" | "text_mining" | "industry" | "learning">("cafe");
+function DiscoveryView() {
+  const [tab, setTab] = useState<"text_mining" | "industry" | "learning">("text_mining");
   const [data, setData] = useState<DiscoveryData>({ cafes: [], insufficientCafes: [], watchedCafes: [], discoveries: [], industries: [], seeds: [] });
   const [selected, setSelected] = useState<number[]>([]);
   const [industrySelected, setIndustrySelected] = useState<number[]>([]);
@@ -590,23 +532,13 @@ function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }
   const [industrySort, setIndustrySort] = useState<"pending" | "section">("pending");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
-  const [watchedCafeId, setWatchedCafeId] = useState("");
-  const [watchedCafeName, setWatchedCafeName] = useState("아프니까 사장이다");
-  const [watchedSeeds, setWatchedSeeds] = useState("자영업, 폐업, 임대료, 배달수수료, 알바, 매출, 세금, 권리금");
-
   const load = useCallback(async () => {
     try {
-      const [response, watchedResponse] = await Promise.all([
-        fetch("/api/discovery", { cache: "no-store" }),
-        fetch("/api/watched-cafes", { cache: "no-store" }),
-      ]);
+      const response = await fetch("/api/discovery", { cache: "no-store" });
       const payload = await response.json() as DiscoveryData;
-      const watchedPayload = await watchedResponse.json() as { watchedCafes?: WatchedCafeStat[]; error?: string };
       if (!response.ok) throw new Error(payload.error ?? "검색어 발굴 데이터를 불러오지 못했습니다.");
-      if (!watchedResponse.ok) throw new Error(watchedPayload.error ?? "주목 카페를 불러오지 못했습니다.");
-      const merged = { ...payload, watchedCafes: watchedPayload.watchedCafes ?? [] };
-      setData(merged);
-      setIndustrySelected(current => current.filter(id => merged.industries.some(industry => industry.id === id && !industry.done)));
+      setData(payload);
+      setIndustrySelected(current => current.filter(id => payload.industries.some(industry => industry.id === id && !industry.done)));
     } catch (error) { setMessage(error instanceof Error ? error.message : "검색어 발굴 데이터를 불러오지 못했습니다."); }
   }, []);
   useEffect(() => {
@@ -622,54 +554,11 @@ function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }
       const result = await response.json() as { error?: string; added?: number; created?: number; translated?: number; calls?: number };
       if (!response.ok) throw new Error(result.error ?? "작업에 실패했습니다.");
       if (action === "approve") { setMessage(tab === "industry" ? `${result.added ?? 0}개 검색어를 시드에 추가했습니다. 업종 출처 시드는 자동 실행에서 제외됩니다.` : `${result.added ?? 0}개 검색어를 시드에 추가했습니다.`); setSelected([]); }
-      if (action === "cafe-to-industry") { setMessage("카페 이름을 업종 번역 대기열에 보냈습니다."); setTab("industry"); }
       if (action === "mine-text") setMessage(`${result.calls ?? 0}회 배치 호출로 ${result.created ?? 0}개 원문 어휘를 찾았습니다.`);
       if (action === "translate-industries") { setMessage(`${result.translated ?? 0}개 업종을 ${result.calls ?? 0}회 호출로 번역했습니다.`); setIndustrySelected([]); }
       await load();
     } catch (error) { setMessage(error instanceof Error ? error.message : "작업에 실패했습니다."); }
     finally { setBusy(""); }
-  };
-
-  const runWatchedAction = async (action: "save" | "toggle" | "focus" | "delete", extra: Record<string, unknown> = {}) => {
-    if (busy) return;
-    setBusy(`watched-${action}`); setMessage("");
-    try {
-      const response = await fetch("/api/watched-cafes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, ...extra }),
-      });
-      const result = await response.json() as { error?: string; savedCandidates?: number; stageCounts?: Record<string, number>; queries?: string[] };
-      if (!response.ok) throw new Error(result.error ?? "주목 카페 작업에 실패했습니다.");
-      if (action === "save") {
-        setMessage("주목 카페를 저장했습니다. 매일 자동 실행에서 최대 4개 조준 검색 슬롯을 사용합니다.");
-        setWatchedCafeId("");
-      }
-      if (action === "toggle") setMessage("활성 상태를 변경했습니다.");
-      if (action === "delete") setMessage("주목 목록에서 삭제했습니다. 기존 후보와 수집 기록은 그대로 보존됩니다.");
-      if (action === "focus") {
-        const watchedCount = Number(result.stageCounts?.watchedCollected ?? 0);
-        setMessage(`조준 수집 완료 · 주목 카페 일치 ${watchedCount}건 · 새 후보 ${result.savedCandidates ?? 0}건`);
-        await onRunComplete();
-      }
-      await load();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "주목 카페 작업에 실패했습니다.");
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const editWatchedCafe = (cafe: WatchedCafeStat) => {
-    setWatchedCafeId(cafe.cafeId);
-    setWatchedCafeName(cafe.cafeName);
-    setWatchedSeeds(cafe.topicSeeds.join(", "));
-  };
-
-  const prepareCafeRegistration = (cafe: CafeStat) => {
-    setWatchedCafeId(cafe.cafeId);
-    setWatchedCafeName(cafe.cafeName ?? cafe.cafeId);
-    setMessage("주제어를 확인한 뒤 주목 카페로 저장하세요. 저장 후 즉시 집중 수집할 수 있습니다.");
   };
 
   const candidates = tab === "learning" ? [] : data.discoveries.filter(item => item.origin === tab);
@@ -697,57 +586,16 @@ function DiscoveryView({ onRunComplete }: { onRunComplete: () => Promise<void> }
   return <div className="discovery-page">
     <div className="discovery-summary">
       <div><span>승인된 시드</span><strong>{data.seeds.length}</strong><small>오래 안 쓴 순으로 실행</small></div>
-      <div><span>카페 금맥</span><strong>{data.cafes.length}</strong><small>기존 수집 URL 집계</small></div>
       <div><span>승인 대기</span><strong>{data.discoveries.length}</strong><small>자동 실행 없음</small></div>
       <div><span>업종 진행</span><strong>{completedIndustries.length}/{data.industries.length}</strong><small>버튼 실행만 번역</small></div>
     </div>
     <div className="discovery-tabs" role="tablist" aria-label="검색어 발굴 방식">
-      <button role="tab" aria-selected={tab === "cafe"} className={tab === "cafe" ? "active" : ""} onClick={() => setTab("cafe")}><b>A</b><span>카페 금맥<small>기존 데이터 역채굴</small></span></button>
       <button role="tab" aria-selected={tab === "text_mining"} className={tab === "text_mining" ? "active" : ""} onClick={() => setTab("text_mining")}><b>B</b><span>원문 어휘<small>통과 글 표현 추출</small></span></button>
       <button role="tab" aria-selected={tab === "industry"} className={tab === "industry" ? "active" : ""} onClick={() => setTab("industry")}><b>C</b><span>업종 사전<small>KSIC → 현업 어휘</small></span></button>
       <button role="tab" aria-selected={tab === "learning"} className={tab === "learning" ? "active" : ""} onClick={() => setTab("learning")}><b>D</b><span>학습 제안<small>거부 사유 → 승인형 룰</small></span></button>
     </div>
 
     {message && <div className="discovery-message" role="status">{message}</div>}
-
-    {tab === "cafe" && <section className="discovery-panel">
-      <header><div><span>AXIS A</span><h2>주목 카페를 조준하고, 기존 카페 금맥도 넓히기</h2><p>네이버 API는 특정 카페만 검색할 수 없습니다. 주제어로 전체 카페를 검색한 뒤 URL의 카페 ID가 일치하는 글을 우선 표시합니다.</p></div></header>
-      <div className="watched-cafe-manager">
-        <div className="watched-manager-head"><div><strong>★ 주목 카페</strong><span>가입한 카페의 원문은 링크로 직접 읽고 최종 판단합니다.</span></div><em>원문 크롤링 없음</em></div>
-        <div className="watched-cafe-form">
-          <label><span>카페 ID</span><input value={watchedCafeId} onChange={event => setWatchedCafeId(event.target.value)} placeholder="cafe.naver.com/{cafe_id}" /></label>
-          <label><span>카페명</span><input value={watchedCafeName} onChange={event => setWatchedCafeName(event.target.value)} placeholder="아프니까 사장이다" /></label>
-          <label className="watched-seeds-input"><span>주제어 · 쉼표 구분</span><input value={watchedSeeds} onChange={event => setWatchedSeeds(event.target.value)} placeholder="자영업, 폐업, 임대료…" /></label>
-          <button onClick={() => void runWatchedAction("save", { cafeId: watchedCafeId, cafeName: watchedCafeName, topicSeeds: watchedSeeds })} disabled={Boolean(busy) || !watchedCafeId.trim() || !watchedCafeName.trim() || !watchedSeeds.trim()}>{busy === "watched-save" ? "저장 중…" : "주목 카페 저장"}</button>
-        </div>
-        <p className="watched-explainer">집중 수집은 “이 카페만 검색”이 아니라, 등록한 주제어로 넓게 검색해 이 카페 글을 우선 표시하는 방식입니다.</p>
-        <div className="watched-cafe-list">
-          {data.watchedCafes.map(cafe => <article className={!cafe.active ? "inactive" : ""} key={cafe.id}>
-            <div><span className="watched-access-badge">{cafe.active ? "활성" : "비활성"}</span><strong>{cafe.cafeName}</strong><code>{cafe.cafeId}</code>{cafe.origin === "candidate" && <small className="candidate-origin-badge">후보에서 추가됨</small>}</div>
-            <p>{cafe.topicSeeds.join(" · ")}</p>
-            <dl><div><dt>수집</dt><dd>{cafe.collected}</dd></div><div><dt>1차 통과</dt><dd>{cafe.passed}</dd></div><div><dt>추적</dt><dd>{cafe.tracked}</dd></div><div><dt>추적률</dt><dd>{(cafe.trackingRate * 100).toFixed(1)}%</dd></div></dl>
-            <footer><button onClick={() => editWatchedCafe(cafe)} disabled={Boolean(busy)}>편집</button><button onClick={() => void runWatchedAction("toggle", { id: cafe.id, active: !cafe.active })} disabled={Boolean(busy)}>{cafe.active ? "비활성화" : "활성화"}</button><button className="watched-delete-button" onClick={() => { if (window.confirm(`“${cafe.cafeName}”을 주목 목록에서 삭제할까요?\n기존 후보와 수집 기록은 삭제되지 않습니다.`)) void runWatchedAction("delete", { id: cafe.id }); }} disabled={Boolean(busy)}>삭제</button><button className="focus-run-button" onClick={() => void runWatchedAction("focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy) || !cafe.active}>{busy === "watched-focus" ? "수집 중…" : "이 카페 집중 수집"}</button></footer>
-          </article>)}
-          {!data.watchedCafes.length && <div className="discovery-empty">아직 등록된 주목 카페가 없습니다. 위에 카페 ID를 입력해 시작하세요.</div>}
-        </div>
-      </div>
-      <div className="cafe-table">
-        <div className="cafe-head"><span>카페 ID</span><span>카페명</span><span>수집</span><span>통과</span><span>통과율</span><span>활용</span></div>
-        {data.cafes.map(cafe => {
-          const watched = data.watchedCafes.find(item => item.cafeId === cafe.cafeId);
-          return <div className="cafe-row" key={cafe.cafeId}><strong>{cafe.cafeId}</strong><span>{cafe.cafeName ?? cafe.cafeId}{watched && <small className="watched-inline"> ★ 주목</small>}</span><b>{cafe.collected}</b><b>{cafe.passed}</b><div><i style={{ width: `${Math.round(cafe.passRate * 100)}%` }} /><em>{(cafe.passRate * 100).toFixed(1)}%</em></div><div>{watched ? <button onClick={() => void runWatchedAction("focus", { cafeId: cafe.cafeId })} disabled={Boolean(busy) || !watched.active}>{busy === "watched-focus" ? "수집 중" : "이 카페 집중 수집"}</button> : <button onClick={() => prepareCafeRegistration(cafe)} disabled={Boolean(busy)}>주목 등록</button>}<button className="link-button" onClick={() => void runAction("cafe-to-industry", { cafeId: cafe.cafeId })} disabled={Boolean(busy)}>업종 번역으로 →</button></div></div>;
-        })}
-        {!data.cafes.length && <div className="discovery-empty">표본 5건 이상인 네이버 카페가 없습니다.</div>}
-      </div>
-      <details className="insufficient-cafes">
-        <summary>표본 부족 · 수집 5건 미만 <b>{data.insufficientCafes.length}</b></summary>
-        <div className="cafe-table">
-          <div className="cafe-head compact"><span>카페 ID</span><span>표시명</span><span>수집</span><span>통과</span><span>통과율</span><span>상태</span></div>
-          {data.insufficientCafes.map(cafe => <div className="cafe-row compact" key={cafe.cafeId}><strong>{cafe.cafeId}</strong><span>{cafe.cafeName ?? cafe.cafeId}</span><b>{cafe.collected}</b><b>{cafe.passed}</b><div><i style={{ width: `${Math.round(cafe.passRate * 100)}%` }} /><em>{(cafe.passRate * 100).toFixed(1)}%</em></div><span className="sample-badge">표본 부족</span></div>)}
-        </div>
-      </details>
-      <CandidateApproval items={candidates} selected={selected} toggle={toggle} selectAll={selectAll} onApprove={() => void runAction("approve", { ids: selected.filter(id => candidates.some(item => item.id === id)) })} busy={busy} />
-    </section>}
 
     {tab === "text_mining" && <section className="discovery-panel">
       <header className="action-header"><div><span>AXIS B</span><h2>통과 원문에서 실제 표현 찾기</h2><p>최근 1차 통과 원문의 제목과 본문을 한 번의 배치 호출로 분석하고, 실제 등장 빈도를 다시 계산합니다.</p></div><button onClick={() => void runAction("mine-text")} disabled={Boolean(busy)}>{busy === "mine-text" ? "추출 중…" : "원문 어휘 추출 · 1회"}</button></header>
@@ -875,8 +723,9 @@ function CandidateApproval({ items, selected, toggle, selectAll, onApprove, busy
 }
 
 function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
-  const [sources, setSources] = useState(["앱리뷰", "네이버카페", "지식iN", "블로그"]);
-  const [sourceWeights, setSourceWeights] = useState({ appreview: 40, blog: 20, kin: 10, cafearticle: 15, threads: 15 });
+  const [sources, setSources] = useState(["앱리뷰", "Threads", "HN"]);
+  const [threadsKeywordEnabled, setThreadsKeywordEnabled] = useState(false);
+  const [sourceWeights, setSourceWeights] = useState({ appreview: 85, threads: 0, hn: 15 });
   const [queries, setQueries] = useState<string[]>([]);
   const [queryInput, setQueryInput] = useState("");
   const [running, setRunning] = useState(false);
@@ -885,8 +734,9 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
   const [autoVerifyTopN, setAutoVerifyTopN] = useState(10);
   const [reviewQueueSize, setReviewQueueSize] = useState(DEFAULT_REVIEW_QUEUE_SIZE);
   const [reviewMinScore, setReviewMinScore] = useState(DEFAULT_REVIEW_QUEUE_MIN_SCORE);
-  const [reviewApps, setReviewApps] = useState<Array<{ id: number; name: string; iosId: string | null; androidPackage: string | null; iosUrl: string | null; androidUrl: string | null; active: boolean; collected: number; candidates: number; trackingRate: number }>>([]);
+  const [reviewApps, setReviewApps] = useState<Array<{ id: number; name: string; category: string; iosId: string | null; androidPackage: string | null; iosUrl: string | null; androidUrl: string | null; active: boolean; collected: number; candidates: number; trackingRate: number }>>([]);
   const [appQuery, setAppQuery] = useState("");
+  const [appCategory, setAppCategory] = useState("미분류");
   const [appSearching, setAppSearching] = useState(false);
   const [appResults, setAppResults] = useState<Array<{ platform: "ios" | "android"; name: string; appId: string; url: string; developer: string | null; icon: string | null }>>([]);
   const loadReviewApps = useCallback(async () => {
@@ -911,14 +761,15 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
   const configBody = () => ({
     name: "직접 검색",
     queries,
-    sources: Object.fromEntries(sources.map(source => [source, true])),
+    sources: { ...Object.fromEntries(sources.map(source => [source, true])), threadsKeywordSearch: threadsKeywordEnabled },
     source_weights: sourceWeights,
+    threads_keyword_search_enabled: threadsKeywordEnabled,
     period_days: 7,
     auto_verify_top_n: autoVerifyTopN,
     limits: { queries: Math.min(Math.max(queries.length, 1), 20), itemsPerSource: 50, dailyCostUsd: 3 },
   });
   const startRun = async () => {
-    if (!queries.length && !sources.includes("앱리뷰")) { setRunMessage("검색어를 1개 이상 입력해 주세요."); return; }
+    if (!queries.length && !sources.includes("앱리뷰") && !(sources.includes("Threads") && !threadsKeywordEnabled)) { setRunMessage("검색어를 1개 이상 입력해 주세요."); return; }
     if (sources.includes("앱리뷰") && !reviewApps.some(app => app.active)) { setRunMessage("활성 리뷰 수집 대상 앱을 1개 이상 등록해 주세요."); return; }
     if (!sources.length) { setRunMessage("검색 소스를 1개 이상 선택해 주세요."); return; }
     setRunning(true);
@@ -956,7 +807,7 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
     finally { setRunning(false); }
   };
   const saveConfig = async () => {
-    if (!queries.length && !sources.includes("앱리뷰")) { setRunMessage("검색어를 1개 이상 입력해 주세요."); return; }
+    if (!queries.length && !sources.includes("앱리뷰") && !(sources.includes("Threads") && !threadsKeywordEnabled)) { setRunMessage("검색어를 1개 이상 입력해 주세요."); return; }
     if (!sources.length) { setRunMessage("검색 소스를 1개 이상 선택해 주세요."); return; }
     setSaved(false);
     try {
@@ -1006,7 +857,7 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
     finally { setAppSearching(false); }
   };
   const addReviewApp = async (app: (typeof appResults)[number]) => {
-    const response = await fetch("/api/review-apps", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", ...app }) });
+    const response = await fetch("/api/review-apps", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", category: appCategory, ...app }) });
     const data = await response.json() as { error?: string };
     if (!response.ok) { setRunMessage(data.error ?? "앱을 추가하지 못했습니다."); return; }
     await loadReviewApps();
@@ -1018,11 +869,24 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
     if (!response.ok) { const data = await response.json().catch(() => ({})) as { error?: string }; setRunMessage(data.error ?? "앱 상태를 바꾸지 못했습니다."); return; }
     await loadReviewApps();
   };
+  const changeReviewAppCategory = async (app: (typeof reviewApps)[number], category: string) => {
+    const response = await fetch("/api/review-apps", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "category", id: app.id, category }) });
+    if (!response.ok) { const data = await response.json().catch(() => ({})) as { error?: string }; setRunMessage(data.error ?? "앱 카테고리를 바꾸지 못했습니다."); return; }
+    await loadReviewApps();
+  };
+  const setThreadsKeywordMode = (enabled: boolean) => {
+    setThreadsKeywordEnabled(enabled);
+    setSourceWeights(enabled ? { appreview: 45, threads: 45, hn: 10 } : { appreview: 85, threads: 0, hn: 15 });
+  };
+  const appCategories = [...new Set(["미분류", "자영업 도구", "생산성 앱", "예약 앱", ...reviewApps.map(app => app.category)])];
+  const categorizedApps = appCategories
+    .map(category => ({ category, apps: reviewApps.filter(app => app.category === category) }))
+    .filter(group => group.apps.length);
   return <div className="settings-wrap">
     <div className="settings-grid">
-      <section className="setting-card search-card query-card"><header><span>01</span><div><h2>검색어·소스</h2><p>앱 리뷰는 등록한 대상 앱만, 나머지 소스는 입력한 검색어로 수집합니다.</p></div><small>{queries.length} / 20</small></header><label className="field-label">직접 검색어</label><div className="query-entry"><input value={queryInput} onChange={e => setQueryInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addQueries(); } }} placeholder="검색어 입력 후 Enter · 쉼표로 여러 개 추가" /><button onClick={addQueries}>추가</button></div><div className="query-tags">{queries.map((query, index) => <span key={query}><b>{String(index + 1).padStart(2, "0")}</b>{query}<button onClick={() => setQueries(current => current.filter(value => value !== query))} aria-label={`${query} 삭제`}>×</button></span>)}{!queries.length && <p>앱 리뷰만 실행한다면 검색어 없이도 됩니다. 다른 소스는 검색어를 추가해 주세요.</p>}</div>{queries.length > 5 && <p className="manual-limit-alert">검색어 {queries.length}개를 모두 저장하고, 이번 실행에서는 앞의 5개만 처리합니다.</p>}<label className="field-label">검색 소스</label><div className="source-options">{["앱리뷰", "네이버카페", "지식iN", "블로그", "웹문서", "Threads", "HN"].map(s => <button key={s} className={sources.includes(s) ? "on" : ""} onClick={() => toggleSource(s)}><i />{s}{s === "앱리뷰" && <em>주력</em>}{s === "Threads" && <em>승인 필요</em>}</button>)}</div><p className="query-note">이번 실행의 총 수집 상한 안에서 설정 비중대로 배분합니다. Threads 미연결 시 해당 15%는 앱 리뷰와 블로그로 자동 재배분됩니다.</p></section>
-      <section className="setting-card review-app-card"><header><span>02</span><div><h2>리뷰 수집 대상 앱</h2><p>좋은 앱을 등록해 두고 iOS·Android의 1~3점 리뷰를 계속 봅니다.</p></div><small>{reviewApps.filter(app => app.active).length}개 활성</small></header><div className="app-search"><input value={appQuery} onChange={event => setAppQuery(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void searchApps(); } }} placeholder="앱 이름 검색" /><button onClick={() => void searchApps()} disabled={appSearching}>{appSearching ? "검색 중…" : "iTunes·Google Play 검색"}</button></div>{appResults.length > 0 && <div className="app-search-results">{appResults.map(app => <article key={`${app.platform}-${app.appId}`}><div><span><strong>{app.name}</strong><small>{app.platform === "android" ? "Android" : "iOS"} · {app.developer ?? "개발사 미상"}</small></span></div><button onClick={() => void addReviewApp(app)}>목록 추가</button></article>)}</div>}<div className="review-app-list">{reviewApps.map(app => <article key={app.id} className={app.active ? "" : "inactive"}><div><strong>{app.name}</strong><span>{app.iosId && <em>iOS · {app.iosId}</em>}{app.androidPackage && <em>Android · {app.androidPackage}</em>}</span><small>{app.collected}건 수집 · 후보 {app.candidates}건 · 추적률 {(app.trackingRate * 100).toFixed(1)}%</small></div><button className={app.active ? "active" : ""} onClick={() => void toggleReviewApp(app)} aria-pressed={app.active}>{app.active ? "수집 중" : "꺼짐"}</button></article>)}{!reviewApps.length && <div className="review-app-empty">아직 등록한 앱이 없습니다. 앱을 검색해 수집 대상을 추가하세요.</div>}</div><p className="app-risk-note">Google Play는 앱당 최대 100건·요청 간 1~2초 간격으로 순차 수집하며, 차단 감지 시 해당 실행의 Android 수집만 멈춥니다.</p></section>
-      <section className="setting-card limit-card"><header><span>03</span><div><h2>실행·검토 상한</h2><p>수집량과 사람이 하루에 볼 분량을 각각 제한합니다.</p></div></header><div className="limit-grid"><label>이번 실행 검색어<div><input type="number" value={Math.min(queries.length, 5)} readOnly /><span>최대 5</span></div></label><label>전체 수집 상한<div><input type="number" value="50" readOnly /><span>총 건수</span></div></label><label>자동 정밀 검증<div><input type="number" min="0" max="10" value={autoVerifyTopN} onChange={event => setAutoVerifyTopN(Math.min(10, Math.max(0, Number(event.target.value) || 0)))} /><span>상위 N건</span></div></label><label>일일 비용 상한<div><b>$</b><input type="number" defaultValue="3" /><span>최대 $10</span></div></label></div><div className="review-queue-editor"><div><strong>오늘의 검토 큐</strong><span>기본 화면에는 이만큼만 표시하고, 처리하면 다음 후보가 자동으로 채워집니다.</span></div><label>한 번에 볼 후보 <input type="number" min="5" max="30" value={reviewQueueSize} onChange={event => setReviewQueueSize(Math.min(30, Math.max(5, Number(event.target.value) || 10)))} /><b>개</b></label><label>검토 큐 최소 점수 <input type="range" min="0" max="10" step="1" value={reviewMinScore} onChange={event => setReviewMinScore(Number(event.target.value))} /><output>{reviewMinScore}점</output></label></div><div className="source-ratio-editor"><strong>전체 소스 목표 비중</strong><label>앱 리뷰 <input type="number" min="0" max="100" value={sourceWeights.appreview} onChange={event => setSourceWeights(current => ({ ...current, appreview: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label><label>블로그 <input type="number" min="0" max="100" value={sourceWeights.blog} onChange={event => setSourceWeights(current => ({ ...current, blog: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label><label>지식iN <input type="number" min="0" max="100" value={sourceWeights.kin} onChange={event => setSourceWeights(current => ({ ...current, kin: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label><label>카페 <input type="number" min="0" max="100" value={sourceWeights.cafearticle} onChange={event => setSourceWeights(current => ({ ...current, cafearticle: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label><label>Threads <input type="number" min="0" max="100" value={sourceWeights.threads} onChange={event => setSourceWeights(current => ({ ...current, threads: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label></div><p className="limit-note"><span>!</span> 지식iN은 축소 유지하고, 주목 카페는 자동 실행의 별도 검색 슬롯으로 보존합니다.</p></section>
+      <section className="setting-card review-app-card"><header><span>01</span><div><h2>리뷰 수집 대상 앱</h2><p>카테고리별로 앱을 등록하고 iOS·Android의 1~3점 리뷰를 계속 봅니다.</p></div><small>{reviewApps.filter(app => app.active).length}개 활성</small></header><div className="app-search"><select value={appCategory} onChange={event => setAppCategory(event.target.value)}>{appCategories.map(category => <option key={category}>{category}</option>)}</select><input value={appQuery} onChange={event => setAppQuery(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void searchApps(); } }} placeholder="앱 이름 검색" /><button onClick={() => void searchApps()} disabled={appSearching}>{appSearching ? "검색 중…" : "iTunes·Google Play 검색"}</button></div>{appResults.length > 0 && <div className="app-search-results">{appResults.map(app => <article key={`${app.platform}-${app.appId}`}><div><span><strong>{app.name}</strong><small>{app.platform === "android" ? "Android" : "iOS"} · {app.developer ?? "개발사 미상"}</small></span></div><button onClick={() => void addReviewApp(app)}>{appCategory}에 추가</button></article>)}</div>}<div className="review-app-list">{categorizedApps.map(group => <section className="review-app-group" key={group.category}><h3>{group.category}<small>{group.apps.length}개</small></h3>{group.apps.map(app => <article key={app.id} className={app.active ? "" : "inactive"}><div><strong>{app.name}</strong><span>{app.iosId && <em>iOS · {app.iosId}</em>}{app.androidPackage && <em>Android · {app.androidPackage}</em>}</span><small>{app.collected}건 수집 · 후보 {app.candidates}건 · 추적률 {(app.trackingRate * 100).toFixed(1)}%</small></div><select value={app.category} onChange={event => void changeReviewAppCategory(app, event.target.value)}>{appCategories.map(category => <option key={category}>{category}</option>)}</select><button className={app.active ? "active" : ""} onClick={() => void toggleReviewApp(app)} aria-pressed={app.active}>{app.active ? "수집 중" : "꺼짐"}</button></article>)}</section>)}{!reviewApps.length && <div className="review-app-empty">아직 등록한 앱이 없습니다. 앱을 검색해 수집 대상을 추가하세요.</div>}</div><p className="app-risk-note">Google Play는 앱당 최대 100건·요청 간 1~2초 간격으로 순차 수집하며, 차단 감지 시 해당 실행의 Android 수집만 멈춥니다.</p></section>
+      <section className="setting-card search-card query-card"><header><span>02</span><div><h2>검색어·소스</h2><p>앱 리뷰는 등록 앱만, Threads·HN은 입력 검색어로 수집합니다.</p></div><small>{queries.length} / 20</small></header><label className="field-label">직접 검색어</label><div className="query-entry"><input value={queryInput} onChange={e => setQueryInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addQueries(); } }} placeholder="검색어 입력 후 Enter · 쉼표로 여러 개 추가" /><button onClick={addQueries}>추가</button></div><div className="query-tags">{queries.map((query, index) => <span key={query}><b>{String(index + 1).padStart(2, "0")}</b>{query}<button onClick={() => setQueries(current => current.filter(value => value !== query))} aria-label={`${query} 삭제`}>×</button></span>)}{!queries.length && <p>앱 리뷰와 Threads 본인 글만 실행한다면 검색어 없이도 됩니다.</p>}</div>{queries.length > 5 && <p className="manual-limit-alert">검색어 {queries.length}개를 모두 저장하고, 이번 실행에서는 앞의 5개만 처리합니다.</p>}<label className="field-label">검색 소스</label><div className="source-options">{["앱리뷰", "Threads", "HN"].map(s => <button key={s} className={sources.includes(s) ? "on" : ""} onClick={() => toggleSource(s)}><i />{s}{s === "앱리뷰" && <em>주력</em>}{s === "Threads" && <em>{threadsKeywordEnabled ? "키워드 활성" : "basic"}</em>}</button>)}</div><label className="threads-mode-toggle"><input type="checkbox" checked={threadsKeywordEnabled} onChange={event => setThreadsKeywordMode(event.target.checked)} /><span>Threads 키워드검색 활성</span><small>{threadsKeywordEnabled ? "승인 후 비중 45%로 전환됨" : "threads_basic 본인 글만 소량 수집"}</small></label><p className="query-note">키워드 권한 오류는 승인 대기로 기록하고 앱 리뷰·HN 파이프라인은 계속 실행합니다.</p></section>
+      <section className="setting-card limit-card"><header><span>03</span><div><h2>실행·검토 상한</h2><p>수집량과 사람이 하루에 볼 분량을 각각 제한합니다.</p></div></header><div className="limit-grid"><label>이번 실행 검색어<div><input type="number" value={Math.min(queries.length, 5)} readOnly /><span>최대 5</span></div></label><label>전체 수집 상한<div><input type="number" value="50" readOnly /><span>총 건수</span></div></label><label>자동 정밀 검증<div><input type="number" min="0" max="10" value={autoVerifyTopN} onChange={event => setAutoVerifyTopN(Math.min(10, Math.max(0, Number(event.target.value) || 0)))} /><span>상위 N건</span></div></label><label>일일 비용 상한<div><b>$</b><input type="number" defaultValue="3" /><span>최대 $10</span></div></label></div><div className="review-queue-editor"><div><strong>오늘의 검토 큐</strong><span>기본 화면에는 이만큼만 표시하고, 처리하면 다음 후보가 자동으로 채워집니다.</span></div><label>한 번에 볼 후보 <input type="number" min="5" max="30" value={reviewQueueSize} onChange={event => setReviewQueueSize(Math.min(30, Math.max(5, Number(event.target.value) || 10)))} /><b>개</b></label><label>검토 큐 최소 점수 <input type="range" min="0" max="10" step="1" value={reviewMinScore} onChange={event => setReviewMinScore(Number(event.target.value))} /><output>{reviewMinScore}점</output></label></div><div className="source-ratio-editor"><strong>전체 소스 목표 비중</strong><label>앱 리뷰 <input type="number" min="0" max="100" value={sourceWeights.appreview} onChange={event => setSourceWeights(current => ({ ...current, appreview: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label><label>Threads <input type="number" min="0" max="100" value={sourceWeights.threads} onChange={event => setSourceWeights(current => ({ ...current, threads: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label><label>HN <input type="number" min="0" max="100" value={sourceWeights.hn} onChange={event => setSourceWeights(current => ({ ...current, hn: Math.max(0, Number(event.target.value) || 0) }))} /><span>%</span></label></div><p className="limit-note"><span>!</span> 기본은 앱 리뷰 85%·HN 15%, Threads 키워드 승인 후에는 45%·45%·10%입니다.</p></section>
     </div>
     <div className="settings-footer"><div>{(running || runMessage) && <span className={running ? "run-waiting" : ""}>{running && <i className="verify-spinner" />} {running ? `실행 중… (검색어 ${Math.min(queries.length, 5)}개, 최대 수 분 소요)` : runMessage}</span>}</div><button className="secondary" onClick={saveConfig}>{saved ? "✓ 저장됨" : "설정 저장"}</button><button className="primary" onClick={startRun} disabled={running}>{running ? "실행 중…" : "▶ 지금 실행"}</button></div>
   </div>;
@@ -1070,8 +934,6 @@ function LogsView({ runs }: { runs: RunLog[] }) {
   const llm1PassRate = Number(run.stageCounts.llm1_pass_rate ?? 0);
   const previouslyUserRejected = Number(run.stageCounts.previouslyUserRejected ?? 0);
   const activeFilterExcluded = Number(run.stageCounts.activeFilterExcluded ?? 0);
-  const watchedCollected = Number(run.stageCounts.watchedCollected ?? 0);
-  const watchedLlm1Passed = Number(run.stageCounts.watchedLlm1Passed ?? 0);
   const reviewQueueAdded = Number(run.stageCounts.reviewQueueAdded ?? 0);
   const paidOpportunityCount = Number(run.stageCounts.paidOpportunityCount ?? 0);
   const digestTop3 = Array.isArray(run.stageCounts.digestTop3) ? run.stageCounts.digestTop3.map(String).slice(0, 3) : [];
@@ -1088,6 +950,11 @@ function LogsView({ runs }: { runs: RunLog[] }) {
   const endedAt = run.endedAt ? new Date(run.endedAt) : null;
   const duration = endedAt ? Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)) : null;
   const statusLabel = run.status === "completed" ? "완료" : run.status === "running" ? "실행 중" : "중단";
+  const sourceGoal = ["kin", "blog", "cafearticle", "webkr"].some(source => Number(sourceCounts[source] ?? 0) > 0)
+    ? "과거 네이버 구성 실행 · 기록 보존"
+    : run.stageCounts.threadsKeywordSearchEnabled
+      ? "목표 · Threads 45% / 앱 리뷰 45% / HN 10%"
+      : "목표 · 앱 리뷰 85% / HN 15% / Threads basic 연결 유지";
 
   return <div className="logs-layout">
     <aside className="run-list">
@@ -1108,8 +975,7 @@ function LogsView({ runs }: { runs: RunLog[] }) {
         <div><span>정밀 검증</span><strong>{verified}</strong><small>자동·수동 합계</small></div>
       </div>
       <section className="daily-digest"><header><div><span>DAILY DIGEST</span><h3>오늘 볼 것만 압축</h3></div><strong>상위 {Math.min(3, digestTop3.length)}건</strong></header><p>오늘 수집 {collected} · 검토 큐에 오른 것 {reviewQueueAdded} · 그중 유료 1–4개 {paidOpportunityCount}건</p>{digestTop3.length ? <ol>{digestTop3.map((summary, index) => <li key={`${summary}-${index}`}><b>{index + 1}</b><span>{summary}</span></li>)}</ol> : <div className="digest-empty">이 실행에는 검토 큐 요약이 없습니다.</div>}</section>
-      {sourceEntries.length > 0 && <section className="reject-breakdown source-performance"><header><h3>소스별 성과</h3><span>목표 · 앱 리뷰 40% / 블로그 20% / 지식iN 10% / 카페 15% / Threads 15%</span></header><div>{sourceEntries.map(([source, count]) => { const performance = sourceTrackingRates[source]; return <span key={source}><b>{logSourceLabel[source] ?? source}</b>{count}<small>1차 통과 {Number(sourcePassCounts[source] ?? 0)} · 추적률 {((performance?.trackingRate ?? 0) * 100).toFixed(1)}%</small></span>; })}</div></section>}
-      {watchedCollected > 0 && <section className="reject-breakdown watched-run-summary"><header><h3>★ 주목 카페 별도 집계</h3><span>자동 실행 요약</span></header><div><span><b>URL 일치 수집</b>{watchedCollected}</span><span><b>1차 통과</b>{watchedLlm1Passed}</span><span><b>통과율</b>{((watchedLlm1Passed / watchedCollected) * 100).toFixed(1)}%</span></div></section>}
+      {sourceEntries.length > 0 && <section className="reject-breakdown source-performance"><header><h3>소스별 성과</h3><span>{sourceGoal}</span></header><div>{sourceEntries.map(([source, count]) => { const performance = sourceTrackingRates[source]; return <span key={source}><b>{logSourceLabel[source] ?? source}</b>{count}<small>1차 통과 {Number(sourcePassCounts[source] ?? 0)} · 추적률 {((performance?.trackingRate ?? 0) * 100).toFixed(1)}%</small></span>; })}</div></section>}
       {(previouslyUserRejected > 0 || activeFilterExcluded > 0) && <section className="reject-breakdown"><header><h3>사전 제외 영향</h3><span>이번 실행 기준</span></header><div><span><b>사용자 기각 재처리 차단</b>{previouslyUserRejected}</span><span><b>활성 필터 사전 제외</b>{activeFilterExcluded}</span></div></section>}
       {rejectEntries.length > 0 && <section className="reject-breakdown"><header><h3>1차 기각 사유</h3><span>{rejectEntries.reduce((sum, [, value]) => sum + Number(value), 0)}건</span></header><div>{rejectEntries.map(([reason, count]) => <span key={reason}><b>{logRejectLabel[reason] ?? reason}</b>{count}</span>)}</div></section>}
       <section className="error-log"><header><h3>실행 상태</h3></header><div><time>{endedAt ? endedAt.toLocaleTimeString("ko-KR") : startedAt.toLocaleTimeString("ko-KR")}</time><span className={run.status === "completed" ? "info-pill" : "warn-pill"}>{statusLabel}</span><p>{run.stoppedReason || run.errors[0] || "파이프라인 실행 기록이 정상적으로 저장되었습니다."}</p></div></section>

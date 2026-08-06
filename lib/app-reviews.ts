@@ -5,6 +5,7 @@ export type ReviewPlatform = "ios" | "android";
 export type ReviewApp = {
   id: number | string | null;
   name: string;
+  category: string;
   ios_app_id: string | null;
   android_package: string | null;
   ios_url: string | null;

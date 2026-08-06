@@ -12,7 +12,7 @@ create table if not exists run_configs (
   domains jsonb not null default '[]'::jsonb,
   excluded_domains jsonb not null default '["연예","정치","스포츠"]'::jsonb,
   sources jsonb not null default '{}'::jsonb,
-  source_weights jsonb not null default '{"appreview":40,"blog":20,"kin":10,"cafearticle":15,"threads":15,"webkr":0}'::jsonb,
+  source_weights jsonb not null default '{"appreview":85,"threads":0,"hn":15,"blog":0,"kin":0,"cafearticle":0,"webkr":0}'::jsonb,
   period_days integer not null default 7,
   auto_verify_top_n integer not null default 10 check (auto_verify_top_n between 0 and 40),
   app_list jsonb not null default '[]'::jsonb,
@@ -162,6 +162,7 @@ create table if not exists watched_cafes (
 create table if not exists review_apps (
   id bigint generated always as identity primary key,
   name text not null,
+  category text not null default '미분류',
   ios_app_id text,
   android_package text,
   ios_url text,
@@ -258,6 +259,7 @@ create index if not exists filter_additions_active_idx on filter_additions(activ
 create index if not exists filter_additions_origin_idx on filter_additions(origin_pain_point_id, added_at desc);
 create index if not exists watched_cafes_active_idx on watched_cafes(active, created_at);
 create index if not exists review_apps_active_idx on review_apps(active, created_at);
+create index if not exists review_apps_category_active_idx on review_apps(category, active);
 create index if not exists raw_items_watched_idx on raw_items(watched, watched_cafe_id, collected_at desc);
 create index if not exists raw_items_app_review_idx on raw_items(app_target_id, review_platform, collected_at desc);
 create index if not exists raw_items_review_status_idx on raw_items(review_status, review_override, collected_at desc);

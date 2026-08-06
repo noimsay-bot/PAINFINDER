@@ -13,14 +13,14 @@ async function render() {
   );
 }
 
-test("Painfinder 제품 화면과 주목 카페·검색어 발굴 메뉴를 서버 렌더링한다", async () => {
+test("Painfinder 제품 화면과 검색어 발굴 메뉴를 서버 렌더링한다", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<title>Painfinder — 페인포인트 검증 콘솔<\/title>/);
   assert.match(html, /PAIN<strong>FINDER<\/strong>/);
-  assert.match(html, /주목 카페·발굴/);
+  assert.match(html, /검색어 발굴/);
   assert.match(html, /실제 데이터를 불러오는 중입니다/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Codex is working/i);
 });
@@ -90,12 +90,13 @@ test("광고 판정·소스 비중·스니펫 신뢰도와 대체 링크를 코�
   ]);
   assert.match(pipeline, /is_promotional=true이면 반드시 pass=false/);
   assert.match(pipeline, /promotional:\s*rejectReasonCounts\.promotional/);
-  assert.match(pipeline, /appreview:\s*40[\s\S]*blog:\s*20[\s\S]*kin:\s*10[\s\S]*cafearticle:\s*15[\s\S]*threads:\s*15/);
+  assert.match(pipeline, /appreview:\s*85[\s\S]*threads:\s*0[\s\S]*hn:\s*15/);
+  assert.match(pipeline, /appreview:\s*45[\s\S]*threads:\s*45[\s\S]*hn:\s*10/);
   assert.match(pipeline, /source_counts/);
   assert.match(page, /원문 스니펫 전문/);
   assert.match(page, /네이버에서 검색/);
   assert.match(page, /판단 재료 부족/);
-  assert.match(page, /카페 가입이 필요할 수 있음/);
+  assert.doesNotMatch(page, /카페 가입이 필요할 수 있음/);
   assert.match(dashboard, /b\.bodyLength - a\.bodyLength/);
   assert.match(decisions, /extractPromotionalExclusionTerms/);
   assert.match(learning, /promotional_keyword/);
@@ -139,7 +140,7 @@ test("24시간 숨김·재처리 차단·사유 기반 필터 이력과 취소�
   assert.match(migration, /mode text not null check \(mode in \('auto','approved'\)\)/);
 });
 
-test("주목 카페 관리·조준 수집·원문 우대·자동 실행 슬롯을 코드에 고정한다", async () => {
+test("네이버와 주목 카페 UI는 숨기되 코드·테이블·기존 표시 데이터는 보존한다", async () => {
   const [page, dashboard, watchedRoute, watchedHelper, pipeline, automaticRun, schema, migration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
@@ -150,23 +151,24 @@ test("주목 카페 관리·조준 수집·원문 우대·자동 실행 슬롯�
     readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8"),
     readFile(new URL("../supabase/migrations/20260725_watched_cafes.sql", import.meta.url), "utf8"),
   ]);
-  assert.match(page, /주목 카페만/);
-  assert.match(page, /가입한 카페 · 원문 열람 가능/);
-  assert.match(page, /원문 크게 보기/);
-  assert.match(page, /특정 카페만 검색할 수 없습니다/);
+  assert.doesNotMatch(page, /주목 카페만/);
+  assert.doesNotMatch(page, /이 카페 주목하기/);
+  assert.doesNotMatch(page, /카페 금맥/);
+  assert.doesNotMatch(page, /주목 카페 저장/);
+  assert.match(page, /원문 어휘/);
+  assert.match(page, /업종 사전/);
   assert.match(watchedRoute, /body\.action === "focus"/);
   assert.match(watchedRoute, /sources:\s*\{\s*naverCafe:\s*true\s*\}/);
   assert.match(watchedHelper, /WATCHED_CAFE_QUERY_SLOTS = 4/);
   assert.match(watchedHelper, /url\.searchParams\.get\("clubid"\)/);
-  assert.match(pipeline, /normalizeWatchedStage1Result/);
-  assert.match(pipeline, /Number\(b\.watched\) - Number\(a\.watched\)/);
-  assert.match(automaticRun, /AUTO_RUN_LIMITS\.MAX_QUERIES - watchedQueries\.length/);
+  assert.match(pipeline, /ENABLE_NAVER_SOURCES/);
+  assert.match(automaticRun, /isNaverCollectionEnabled/);
   assert.match(dashboard, /watchedCafeName/);
   assert.match(schema, /create table if not exists watched_cafes/);
   assert.match(migration, /alter table raw_items add column if not exists watched/);
 });
 
-test("후보에서 주목 카페를 즉석 추가·해제하고 기존 후보에 소급 표시한다", async () => {
+test("인라인 주목 카페 UI만 제거하고 복구용 구현은 보존한다", async () => {
   const [page, dashboard, watchedRoute, watchedHelper, cafeNames, migration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
@@ -175,10 +177,10 @@ test("후보에서 주목 카페를 즉석 추가·해제하고 기존 후보에
     readFile(new URL("../lib/cafe-names.ts", import.meta.url), "utf8"),
     readFile(new URL("../supabase/migrations/20260725_watched_cafe_candidate_origin.sql", import.meta.url), "utf8"),
   ]);
-  assert.match(page, /이 카페 주목하기/);
-  assert.match(page, /★ 주목 중/);
-  assert.match(page, /event\.key\.toLowerCase\(\) === "w"/);
-  assert.match(page, /주제어 설정 →/);
+  assert.doesNotMatch(page, /이 카페 주목하기/);
+  assert.doesNotMatch(page, /★ 주목 중/);
+  assert.doesNotMatch(page, /event\.key\.toLowerCase\(\) === "w"/);
+  assert.doesNotMatch(page, /주제어 설정 →/);
   assert.match(watchedRoute, /body\.action === "quick_toggle"/);
   assert.match(watchedRoute, /inferCafeSeeds/);
   assert.match(watchedRoute, /origin: existing\?\.origin \?\? "candidate"/);

@@ -35,6 +35,7 @@ export type RunConfig = {
   excluded_domains?: string[];
   sources?: Record<string, boolean>;
   source_weights?: Partial<Record<SourceWeightKey, number>>;
+  threads_keyword_search_enabled?: boolean;
   period_days?: number;
   auto_verify_top_n?: number;
   app_list?: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
@@ -54,6 +55,7 @@ type NormalizedRunConfig = {
   excluded_domains: string[];
   sources: Record<string, boolean>;
   source_weights: Record<SourceWeightKey, number>;
+  threads_keyword_search_enabled: boolean;
   period_days: number;
   auto_verify_top_n: number;
   app_list: Array<{ platform: "ios" | "android"; appId: string; country?: string }>;
@@ -118,14 +120,25 @@ const SOURCE_MAP: Record<string, NaverSearchType> = {
 };
 
 export const DEFAULT_SOURCE_WEIGHTS: Record<SourceWeightKey, number> = {
-  appreview: 40,
-  blog: 20,
-  kin: 10,
-  cafearticle: 15,
-  threads: 15,
+  appreview: 85,
+  blog: 0,
+  kin: 0,
+  cafearticle: 0,
+  threads: 0,
   webkr: 0,
-  hn: 0,
+  hn: 15,
 };
+
+export const THREADS_KEYWORD_SOURCE_WEIGHTS: Record<SourceWeightKey, number> = {
+  ...DEFAULT_SOURCE_WEIGHTS,
+  appreview: 45,
+  threads: 45,
+  hn: 10,
+};
+
+export function isNaverCollectionEnabled(value = process.env.ENABLE_NAVER_SOURCES) {
+  return String(value ?? "false").trim().toLocaleLowerCase("en-US") === "true";
+}
 
 export function allocateSourceTargets<T extends string>(
   total: number,
@@ -152,16 +165,13 @@ export function allocateSourceTargets<T extends string>(
 
 export function effectiveSourceWeights(
   weights: Partial<Record<SourceWeightKey, number>>,
-  threadsConnected: boolean,
+  threadsKeywordSearchEnabled: boolean,
 ) {
-  const resolved = { ...DEFAULT_SOURCE_WEIGHTS, ...weights };
-  if (!threadsConnected && resolved.threads > 0) {
-    const released = resolved.threads;
-    resolved.threads = 0;
-    resolved.appreview += Math.round(released * 2 / 3);
-    resolved.blog += released - Math.round(released * 2 / 3);
-  }
-  return resolved;
+  return {
+    ...(threadsKeywordSearchEnabled ? THREADS_KEYWORD_SOURCE_WEIGHTS : DEFAULT_SOURCE_WEIGHTS),
+    ...weights,
+    ...(!threadsKeywordSearchEnabled ? { threads: 0 } : {}),
+  };
 }
 
 function enrichRawSignal(
@@ -189,6 +199,7 @@ function enrichRawSignal(
 }
 
 export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
+  const threadsKeywordSearchEnabled = Boolean(input.threads_keyword_search_enabled || input.sources?.threadsKeywordSearch);
   const queries = Math.min(Math.max(input.limits?.queries ?? DEFAULT_LIMITS.QUERIES_PER_RUN, 1), HARD_LIMITS.QUERIES_PER_RUN);
   const itemsPerSource = Math.min(Math.max(input.limits?.itemsPerSource ?? DEFAULT_LIMITS.ITEMS_PER_SOURCE.naver, 1), HARD_LIMITS.ITEMS_PER_SOURCE);
   const dailyCostUsd = Math.min(Math.max(input.limits?.dailyCostUsd ?? DEFAULT_LIMITS.DAILY_COST_CEILING_USD, .1), HARD_LIMITS.DAILY_COST_CEILING_USD);
@@ -203,11 +214,12 @@ export function normalizeConfig(input: RunConfig): NormalizedRunConfig {
     queries: [...new Set((input.queries ?? input.domains ?? []).map(query => query.trim()).filter(Boolean))],
     query_origins: input.query_origins ?? {},
     excluded_domains: input.excluded_domains ?? ["연예", "정치", "스포츠"],
-    sources: input.sources ?? { naverCafe: true, naverKin: true, naverBlog: true, appreview: true },
+    sources: input.sources ?? { appreview: true, threads: true, hn: true },
     source_weights: {
-      ...DEFAULT_SOURCE_WEIGHTS,
+      ...(threadsKeywordSearchEnabled ? THREADS_KEYWORD_SOURCE_WEIGHTS : DEFAULT_SOURCE_WEIGHTS),
       ...(input.source_weights ?? {}),
     },
+    threads_keyword_search_enabled: threadsKeywordSearchEnabled,
     period_days: Math.min(Math.max(input.period_days ?? 7, 1), 365),
     auto_verify_top_n: Math.min(Math.max(input.auto_verify_top_n ?? 10, 0), DEFAULT_LIMITS.LLM2_MAX_CALLS_PER_RUN),
     app_list: input.app_list ?? [],
@@ -234,6 +246,7 @@ async function collectNaver(
   watchedCafes: WatchedCafe[],
   targets: Partial<Record<SourceWeightKey, number>>,
 ) {
+  if (!isNaverCollectionEnabled()) return [] as RawSignal[];
   const clientId = process.env.NAVER_CLIENT_ID;
   const clientSecret = process.env.NAVER_CLIENT_SECRET;
   if (!clientId || !clientSecret) return [] as RawSignal[];
@@ -297,19 +310,46 @@ async function collectHn(config: ReturnType<typeof normalizeConfig>, queries: st
   return result.slice(0, target);
 }
 
+export function isThreadsApprovalPending(status: number, payload: unknown) {
+  return [400, 403].includes(status) && Boolean(payload);
+}
+
 async function collectThreads(config: ReturnType<typeof normalizeConfig>, queries: string[], errors: string[], canContinue: RunGuard, target: number) {
   if (!config.sources.threads && !config.sources.Threads) return [] as RawSignal[];
-  if (target <= 0) return [] as RawSignal[];
   const token = process.env.THREADS_ACCESS_TOKEN;
   if (!token) { errors.push("threads:access-token-missing"); return []; }
   const result: RawSignal[] = [];
+  if (!config.threads_keyword_search_enabled) {
+    try {
+      const userId = process.env.THREADS_USER_ID || "me";
+      const url = new URL(`https://graph.threads.net/v1.0/${encodeURIComponent(userId)}/threads`);
+      url.searchParams.set("fields", "id,text,permalink,timestamp,username");
+      url.searchParams.set("limit", "3");
+      url.searchParams.set("access_token", token);
+      const response = await fetch(url);
+      const data = await response.json() as { data?: Array<Record<string, unknown>>; error?: unknown };
+      if (!response.ok) throw new Error(`Threads basic ${response.status}: ${JSON.stringify(data.error ?? data)}`);
+      for (const item of data.data ?? []) {
+        result.push(enrichRawSignal({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null, query_text: null, query_origin: "threads_basic", raw_payload: item, source_name: "Threads", author_name: item.username ? String(item.username) : null, highlight_terms: [] }));
+      }
+    } catch (error) { errors.push(`threads:basic:${error instanceof Error ? error.message : "unknown"}`); }
+    return result;
+  }
+  if (target <= 0) return result;
   for (const query of queries.slice(0, 20)) {
     if (!canContinue()) break;
     try {
       const url = new URL("https://graph.threads.net/v1.0/keyword_search");
       url.searchParams.set("q", query); url.searchParams.set("search_type", "RECENT");
       url.searchParams.set("fields", "id,text,permalink,timestamp,username,has_replies"); url.searchParams.set("access_token", token);
-      const response = await fetch(url); const data = await response.json() as { data?: Array<Record<string, unknown>> };
+      const response = await fetch(url); const data = await response.json() as { data?: Array<Record<string, unknown>>; error?: unknown };
+      if (!response.ok) {
+        if (isThreadsApprovalPending(response.status, data.error ?? data)) {
+          errors.push("threads:approval-pending:keyword-search");
+          break;
+        }
+        throw new Error(`Threads ${response.status}: ${JSON.stringify(data.error ?? data)}`);
+      }
       for (const item of data.data ?? []) {
         if (result.length >= target) break;
         result.push(enrichRawSignal({ source: "threads", source_id: String(item.id), url: String(item.permalink), title: `@${String(item.username ?? "threads")}`, body: String(item.text ?? ""), posted_at: String(item.timestamp ?? "") || null, query_text: query, query_origin: config.query_origins[query] ?? "manual", raw_payload: item, source_name: "Threads", author_name: item.username ? String(item.username) : null, highlight_terms: [] }));
@@ -543,36 +583,40 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
   const errors: string[] = [];
   const queries = makeQueries(config);
   const appReviewsEnabled = Boolean(config.sources.appreview || config.sources.appstore || config.sources["앱리뷰"]);
-  if (!queries.length && !appReviewsEnabled) throw new Error("검색어를 1개 이상 입력해 주세요.");
+  const threadsBasicEnabled = Boolean((config.sources.threads || config.sources.Threads) && !config.threads_keyword_search_enabled);
+  if (!queries.length && !appReviewsEnabled && !threadsBasicEnabled) throw new Error("검색어를 1개 이상 입력해 주세요.");
+  const naverCollectionEnabled = isNaverCollectionEnabled();
   const [watchedCafeRows, reviewAppRows] = await Promise.all([
-    supabaseRest("watched_cafes?active=eq.true&select=id,cafe_id,cafe_name,topic_seeds,active&order=id.asc") as Promise<WatchedCafe[] | null>,
+    naverCollectionEnabled
+      ? supabaseRest("watched_cafes?active=eq.true&select=id,cafe_id,cafe_name,topic_seeds,active&order=id.asc") as Promise<WatchedCafe[] | null>
+      : Promise.resolve([] as WatchedCafe[]),
     supabaseRest("review_apps?active=eq.true&select=id,name,ios_app_id,android_package,ios_url,android_url,active&order=id.asc")
       .catch(error => {
         errors.push(`review-apps:${error instanceof Error ? error.message : "unavailable"}`);
         return null;
-      }) as Promise<ReviewApp[] | null>,
+      }) as Promise<Array<Omit<ReviewApp, "category">> | null>,
   ]);
   const watchedCafes = (watchedCafeRows ?? []).map(cafe => ({ ...cafe, topic_seeds: Array.isArray(cafe.topic_seeds) ? cafe.topic_seeds.map(String) : [] }));
   const legacyApps: ReviewApp[] = config.app_list.map(app => ({
     id: null,
     name: app.appId,
+    category: "미분류",
     ios_app_id: app.platform === "ios" ? app.appId : null,
     android_package: app.platform === "android" ? app.appId : null,
     ios_url: null,
     android_url: null,
     active: true,
   }));
-  const reviewApps = reviewAppRows?.length ? reviewAppRows : legacyApps;
-  const threadsConnected = Boolean((config.sources.threads || config.sources.Threads) && process.env.THREADS_ACCESS_TOKEN);
+  const reviewApps = reviewAppRows?.length ? reviewAppRows.map(app => ({ ...app, category: "미분류" })) : legacyApps;
   const enabledWeightedSources: SourceWeightKey[] = [];
-  if (queries.length && (config.sources.naverCafe || config.sources["네이버카페"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("cafearticle");
-  if (queries.length && (config.sources.naverKin || config.sources["지식iN"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("kin");
-  if (queries.length && (config.sources.naverBlog || config.sources["블로그"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("blog");
-  if (queries.length && (config.sources.naverWeb || config.sources["웹문서"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("webkr");
+  if (naverCollectionEnabled && queries.length && (config.sources.naverCafe || config.sources["네이버카페"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("cafearticle");
+  if (naverCollectionEnabled && queries.length && (config.sources.naverKin || config.sources["지식iN"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("kin");
+  if (naverCollectionEnabled && queries.length && (config.sources.naverBlog || config.sources["블로그"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("blog");
+  if (naverCollectionEnabled && queries.length && (config.sources.naverWeb || config.sources["웹문서"]) && process.env.NAVER_CLIENT_ID && process.env.NAVER_CLIENT_SECRET) enabledWeightedSources.push("webkr");
   if (appReviewsEnabled && reviewApps.length) enabledWeightedSources.push("appreview");
-  if (queries.length && threadsConnected) enabledWeightedSources.push("threads");
+  if (queries.length && config.threads_keyword_search_enabled && (config.sources.threads || config.sources.Threads) && process.env.THREADS_ACCESS_TOKEN) enabledWeightedSources.push("threads");
   if (queries.length && (config.sources.hn || config.sources.HN)) enabledWeightedSources.push("hn");
-  const resolvedWeights = effectiveSourceWeights(config.source_weights, threadsConnected);
+  const resolvedWeights = effectiveSourceWeights(config.source_weights, config.threads_keyword_search_enabled);
   const sourceTargets = allocateSourceTargets(config.limits.itemsPerSource, enabledWeightedSources, resolvedWeights);
   const collected = canContinue()
     ? await Promise.all([
@@ -729,7 +773,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
       if (stopIfTimeBudgetReached()) return;
       const candidate = autoTargets[verifyIndex++];
       try {
-        const verification = await verifyMarket({ searchTerms: candidate.analysis.search_terms_for_verification, llm, model: verifyModel, naverClientId: process.env.NAVER_CLIENT_ID, naverClientSecret: process.env.NAVER_CLIENT_SECRET });
+        const verification = await verifyMarket({ searchTerms: candidate.analysis.search_terms_for_verification, llm, model: verifyModel, naverClientId: naverCollectionEnabled ? process.env.NAVER_CLIENT_ID : undefined, naverClientSecret: naverCollectionEnabled ? process.env.NAVER_CLIENT_SECRET : undefined });
         candidate.competitors = mergeProducts(candidate.competitors, verification.products);
         candidate.marketVerdict = classifyMarket(candidate.competitors);
         candidate.scores = calculateFourScores({ aiReplacementScore: candidate.analysis.ai_replacement_score, maintenanceScore: candidate.analysis.maintenance_score, moneySignal: candidate.analysis.money_signal, verdict: candidate.marketVerdict, buyerContext: candidate.analysis.buyer_context, incumbentDissatisfaction: candidate.raw.incumbent_dissatisfaction });
@@ -758,6 +802,7 @@ export async function runPipeline(input: RunConfig, options: RunPipelineOptions 
     watchedCollected: collectedUnique.filter(item => item.watched).length,
     watchedLlm1Passed: stage1.filter(result => result.pass && filtered[Number(result.id)]?.watched).length,
     watchedQueryCount: queries.filter(query => String(config.query_origins[query] ?? "").startsWith("watched_cafe:")).length,
+    threadsKeywordSearchEnabled: config.threads_keyword_search_enabled,
     llm2Analyzed: analyses.length,
     appVerified: analyses.length,
     verified: verifiedItems,

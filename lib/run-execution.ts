@@ -1,5 +1,5 @@
 import { AUTO_RUN_LIMITS, MANUAL_RUN_LIMITS } from "./limits";
-import { supabaseRest, type RunConfig } from "./pipeline";
+import { isNaverCollectionEnabled, supabaseRest, type RunConfig } from "./pipeline";
 import { buildWatchedCafeQueries, WATCHED_CAFE_QUERY_SLOTS, type WatchedCafe } from "./watched-cafes";
 
 type SeedRow = { query_text: string; origin?: string };
@@ -34,9 +34,9 @@ export async function resolveManualQueries(config: RunConfig) {
 }
 
 export async function resolveAutomaticQueries() {
-  const watchedRows = await supabaseRest(
+  const watchedRows = isNaverCollectionEnabled() ? await supabaseRest(
     "watched_cafes?active=eq.true&select=id,cafe_id,cafe_name,topic_seeds,active&order=id.asc",
-  ) as WatchedCafe[] | null;
+  ) as WatchedCafe[] | null : [];
   const watchedQueries = buildWatchedCafeQueries((watchedRows ?? []).map(cafe => ({
     ...cafe,
     topic_seeds: Array.isArray(cafe.topic_seeds) ? cafe.topic_seeds.map(String) : [],
