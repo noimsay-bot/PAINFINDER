@@ -1,5 +1,12 @@
 export const REJECTION_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000;
 
+const HIDDEN_TODAY_SOURCES = new Set(["cafearticle", "kin"]);
+
+export function shouldShowInToday(source: unknown, runId: unknown, latestRunId: unknown) {
+  if (HIDDEN_TODAY_SOURCES.has(String(source ?? ""))) return false;
+  return !latestRunId || String(runId ?? "") === String(latestRunId);
+}
+
 export function isRejectedDecision(action: unknown) {
   return String(action ?? "") === "rejected";
 }

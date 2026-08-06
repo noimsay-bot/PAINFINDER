@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isRecentlyRejected, shouldHideRejectedFromToday } from "../lib/candidate-visibility";
+import { isRecentlyRejected, shouldHideRejectedFromToday, shouldShowInToday } from "../lib/candidate-visibility";
 import { revokeFilterAddition } from "../lib/filter-additions";
 import { normalizeRejectionReasonCategory } from "../lib/learning";
 import { excludeByActiveKeywordFilters, excludePreviouslyRejectedByUser } from "../lib/pipeline";
@@ -15,6 +15,13 @@ test("기각 후보는 24시간 동안 흐리게 남고 그 뒤 오늘 목록에
   assert.equal(shouldHideRejectedFromToday("rejected", recent, now), false);
   assert.equal(shouldHideRejectedFromToday("rejected", expired, now), true);
   assert.equal(shouldHideRejectedFromToday("holding", expired, now), false);
+});
+
+test("오늘의 후보는 최신 수집 실행만 표시하고 카페·지식iN은 숨긴다", () => {
+  assert.equal(shouldShowInToday("appstore", "run-new", "run-new"), true);
+  assert.equal(shouldShowInToday("appstore", "run-old", "run-new"), false);
+  assert.equal(shouldShowInToday("cafearticle", "run-new", "run-new"), false);
+  assert.equal(shouldShowInToday("kin", "run-new", "run-new"), false);
 });
 
 test("rejected_by_user 원문과 활성 키워드 대상은 LLM 처리 전에 제외한다", () => {

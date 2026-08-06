@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { REJECTION_REASON_LABELS, type RejectionReasonCategory } from "@/lib/learning";
-import { isRecentlyRejected, shouldHideRejectedFromToday } from "@/lib/candidate-visibility";
+import { isRecentlyRejected, shouldHideRejectedFromToday, shouldShowInToday } from "@/lib/candidate-visibility";
 import {
   buildReviewQueue,
   DEFAULT_REVIEW_QUEUE_MIN_SCORE,
@@ -19,6 +19,7 @@ type CompetitorPricing = "free" | "freemium" | "paid" | "public" | "unknown";
 
 type Candidate = {
   id: string;
+  runId: string | null;
   summary: string;
   compactSummary: string;
   who: string;
@@ -267,16 +268,18 @@ export default function Home() {
     const timer = window.setInterval(() => setVisibilityNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+  const latestCollectionRun = useMemo(() => logs.find(log => Object.hasOwn(log.stageCounts, "collected")), [logs]);
   const todayItems = useMemo(() => items.filter(item =>
-    !shouldHideRejectedFromToday(item.decision, item.decidedAt, visibilityNow)
-  ), [items, visibilityNow]);
+    shouldShowInToday(item.sourceKey, item.runId, latestCollectionRun?.id)
+    && !shouldHideRejectedFromToday(item.decision, item.decidedAt, visibilityNow)
+  ), [items, latestCollectionRun?.id, visibilityNow]);
   const reviewQueue = useMemo(() => buildReviewQueue(todayItems, reviewSettings), [todayItems, reviewSettings]);
-  const todayReviewedCount = useMemo(() => items.filter(item => reviewedToday(item)).length, [items]);
+  const todayReviewedCount = useMemo(() => todayItems.filter(item => reviewedToday(item)).length, [todayItems]);
   const visible = useMemo(() => (queueMode === "queue" ? reviewQueue.queue : todayItems).filter(item =>
     (sourceFilter === "전체 소스" || item.source === sourceFilter) &&
     (item.summary.includes(search) || item.domain.includes(search) || item.who.includes(search))
   ), [queueMode, reviewQueue.queue, todayItems, search, sourceFilter]);
-  const selected = visible.find(i => i.id === selectedId) ?? visible[0] ?? items.find(i => i.id === selectedId) ?? items[0];
+  const selected = visible.find(i => i.id === selectedId) ?? visible[0] ?? (view === "today" ? todayItems.find(i => i.id === selectedId) ?? todayItems[0] : items.find(i => i.id === selectedId) ?? items[0]);
 
   const verifyCandidate = useCallback(async (painPointId: string) => {
     if (!painPointId || verifyingId) return;
@@ -401,10 +404,10 @@ export default function Home() {
 
       <section className="workspace">
         <Topbar title={titles[view][0]} subtitle={titles[view][1]} dark={dark} setDark={setDark} />
-        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} reviewQueue={reviewQueue} todayReviewedCount={todayReviewedCount} reviewSettings={reviewSettings} queueMode={queueMode} setQueueMode={setQueueMode} lastRun={logs[0]} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} onHoldDomain={holdDomain} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
+        {view === "today" && (selected ? <TodayView allItems={todayItems} visible={visible} selected={selected} reviewQueue={reviewQueue} todayReviewedCount={todayReviewedCount} reviewSettings={reviewSettings} queueMode={queueMode} setQueueMode={setQueueMode} lastRun={latestCollectionRun} setSelectedId={setSelectedId} search={search} setSearch={setSearch} sourceFilter={sourceFilter} setSourceFilter={setSourceFilter} onDecision={decide} onHoldDomain={holdDomain} onVerify={verifyCandidate} verifyingId={verifyingId} rejecting={rejecting} setRejecting={setRejecting} rejectCategory={rejectCategory} setRejectCategory={setRejectCategory} rejectNote={rejectNote} setRejectNote={setRejectNote} /> : <DashboardEmpty loading={loading} error={dataError} setupRequired={setupRequired} onSettings={() => setView("settings")} onRetry={loadDashboard} />)}
         {view === "signals" && <SignalsView items={todayItems} onOpen={(id) => { setSelectedId(id); setView("today"); }} />}
         {view === "discovery" && <DiscoveryView />}
-        {view === "settings" && <SettingsView onRunComplete={loadDashboard} />}
+        {view === "settings" && <SettingsView onRunComplete={async showToday => { await loadDashboard(); if (showToday) { setSearch(""); setSourceFilter("전체 소스"); setQueueMode("queue"); setView("today"); } }} />}
         {view === "archive" && <ArchiveView items={items} onRestore={restoreCandidate} />}
         {view === "logs" && <LogsView runs={logs} />}
       </section>
@@ -434,7 +437,7 @@ function TodayView({ allItems, visible, selected, reviewQueue, todayReviewedCoun
       </div>
       <div className="filter-row">
         <label className="searchbox"><span>⌕</span><input value={search} onChange={e => setSearch(e.target.value)} placeholder="후보 검색" /></label>
-        <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)} aria-label="소스 필터"><option>전체 소스</option><option>네이버 카페</option><option>지식iN</option><option>네이버 블로그</option><option>앱 리뷰</option><option>Threads</option></select>
+        <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)} aria-label="소스 필터"><option>전체 소스</option><option>네이버 블로그</option><option>앱 리뷰</option><option>Threads</option><option>HN</option></select>
         <button className="export-button" onClick={() => downloadCandidatesText(allItems)} disabled={!allItems.length} title="클로드 공유용 TXT 파일로 저장">전체 TXT ↓</button>
       </div>
       <div className="list-head"><span>{queueMode === "queue" ? `검토 큐 ${visible.length}건` : `전체 후보 ${visible.length}건`}</span><small>최근 실행 · {lastRun ? new Date(lastRun.startedAt).toLocaleString("ko-KR") : "없음"}</small></div>
@@ -722,7 +725,7 @@ function CandidateApproval({ items, selected, toggle, selectAll, onApprove, busy
   </div>;
 }
 
-function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
+function SettingsView({ onRunComplete }: { onRunComplete: (showToday?: boolean) => void | Promise<void> }) {
   const [sources, setSources] = useState(["앱리뷰", "Threads", "HN"]);
   const [threadsKeywordEnabled, setThreadsKeywordEnabled] = useState(false);
   const [sourceWeights, setSourceWeights] = useState({ appreview: 85, threads: 0, hn: 15 });
@@ -784,7 +787,7 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
         setRunMessage(response.status === 504
           ? "실행이 시간 제한을 초과했습니다. 검색어 수나 수집량을 줄여 다시 시도해 주세요. 이미 저장된 후보는 목록에 반영되어 있습니다."
           : detail);
-        await onRunComplete();
+        await onRunComplete(true);
         return;
       }
       const result = await response.json() as {
@@ -802,7 +805,7 @@ function SettingsView({ onRunComplete }: { onRunComplete: () => void }) {
       setRunMessage(result.mode === "demo"
         ? "데모 실행 완료 · API 키 연결 시 실수집 시작"
         : `${completion} · ${result.stageCounts?.collected ?? 0}건 수집 / 신규 후보 ${result.savedCandidates ?? 0}건${querySummary}`);
-      await onRunComplete();
+      await onRunComplete(true);
     } catch (error) { setRunMessage(error instanceof Error ? error.message : "실행 실패"); }
     finally { setRunning(false); }
   };

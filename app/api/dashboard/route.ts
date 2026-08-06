@@ -9,8 +9,8 @@ import { sameAppPain } from "@/lib/app-reviews";
 
 type Row = Record<string, unknown>;
 
-const PAIN_POINT_SELECT = "pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,app_target_id,app_name,review_platform,review_score,app_version,incumbent_dissatisfaction,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500";
-const LEGACY_PAIN_POINT_SELECT = "pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500";
+const PAIN_POINT_SELECT = "pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(run_id,source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,app_target_id,app_name,review_platform,review_score,app_version,incumbent_dissatisfaction,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500";
+const LEGACY_PAIN_POINT_SELECT = "pain_points?select=id,pain_summary,who,current_workaround,frequency,money_signal,domain,signal_type,recurrence_count,precision_verified_at,created_at,raw_items(run_id,source,url,title,body,posted_at,status,reject_reason,query_origin,source_name,author_name,body_length,low_confidence,promotional_signals,promotional_signal_score,promotional_rule_flagged,is_promotional,highlight_terms,watched,watched_cafe_id,review_status,review_status_reason,review_override,watched_cafes(cafe_name)),scores(f1,f2,f3,f4,f5,f6,total,data_access_stable,verdict),competitors(name,url,pricing,quality_note,last_updated_signal,seller_name,source),decisions(action,reason,reason_category,reason_note,decided_at)&order=created_at.desc&limit=500";
 
 async function fetchPainRows() {
   try {
@@ -101,6 +101,7 @@ export async function GET() {
       const summary = String(row.pain_summary ?? "요약 없음");
       return {
         id: String(row.id),
+        runId: raw.run_id ? String(raw.run_id) : null,
         summary,
         compactSummary: compactPainSummary(who, summary),
         who,
